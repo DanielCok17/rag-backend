@@ -1,0 +1,69 @@
+# Project TODO List for rag-ai-lawyer
+
+This file tracks the remaining tasks to be implemented for the rag-ai-lawyer project. Tasks reflect what has not yet been done based on current progress.
+
+## Tasks
+1. **[Qdrant Setup] Configure QdrantDB connection in `src/config/qdrant.ts`.**
+   - Establish a client connection and test connectivity.
+
+2. **[Document Import] Implement `src/scripts/import_documents.ts` to populate QdrantDB with legal documents.**
+   - Parse and index Slovak laws and rulings.
+
+3. **[Retrieval Logic] Complete `retrievalService.ts` with QdrantDB vector search.**
+   - Implement lookup and RAG-based retrieval functions.
+
+4. **[RAG Pipeline] Build RAG workflow in `retrievalService.ts`.**
+   - Integrate LangChain for retrieval-augmented generation.
+
+5. **[Prompt Engineering] Define prompt templates in `src/utils/prompts.ts`.**
+   - Create reusable prompts for legal analysis, explanation, and comparison.
+
+6. **[LangChain Setup] Configure LangChain LLM in `src/config/langchain.ts`.**
+   - Set up OpenAI or other LLM provider with API keys.
+
+7. **[API Calls] Implement API call logic in `retrievalService.ts` or `chatService.ts`.**
+   - Handle requests to LLM and QdrantDB with error handling.
+
+8. **[LangSmith Integration] Set up LangSmith in `src/config/langsmith.ts` for model evaluation.**
+   - Configure API key and endpoint for tracking.
+
+9. **[Embedding Generation] Implement `src/embeddings/embeddings.ts` with LangChain.**
+   - Generate embeddings for legal documents.
+
+10. **[Performance Optimization] Add caching in `retrievalService.ts` for frequent queries.**
+    - Use in-memory cache or Redis for performance boost.
+
+11. **[Security] Enhance `src/middleware/authMiddleware.ts` with role-based access.**
+    - Restrict pro-owner models based on user authentication.
+
+12. **[Validation] Add input validation in `src/middleware/validationMiddleware.ts`.**
+    - Validate question length and format.
+
+13. **[Error Handling] Implement global error handling in `src/utils/errorHandler.ts`.**
+    - Centralize error logging and API responses.
+
+14. **[Logging] Set up structured logging in `src/utils/logger.ts`.**
+    - Use Winston or similar for request and error logging.
+
+15. **[API Routes] Define detailed endpoints in `src/routes/chatRoutes.ts`.**
+    - Add endpoints for summarization, export, and correction.
+
+16. **[Controllers] Implement `src/controllers/chatController.ts` with business logic.**
+    - Connect routes to services with input/output transformation.
+
+17. **[Testing] Write unit tests for `retrievalService.ts` in `tests/services/retrievalService.test.ts`.**
+    - Test vector search and RAG pipeline.
+
+18. **[Testing] Write integration tests for `chatService.ts` in `tests/services/chatService.test.ts`.**
+    - Test end-to-end chat workflow.
+
+19. **[Documentation] Update `docs/services/chatService.md` with RAG and API details.**
+    - Include examples for new features.
+
+20. **[Deployment] Create `Dockerfile` and `docker-compose.yml` for production deployment.**
+    - Configure QdrantDB, PostgreSQL, and app services.
+
+## Notes
+- Tasks are prioritized by dependency (e.g., Qdrant setup before retrieval logic).
+- Mark tasks as `[DONE]` when completed, and add new tasks as needed.
+- Review and adjust priorities based on testing and feedback.
