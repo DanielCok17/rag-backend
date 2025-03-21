@@ -7,9 +7,8 @@ import express from 'express';
 import { createServer } from 'http';
 import cors from 'cors';
 import QdrantClientSingleton from './db/qdrantClient';
-import testRoutes from './routes/testRoutes';
-import streamRoutes from './routes/streamRoutes';
 import SocketService from './services/socketService';
+import routes from './routes';
 
 class Application {
     private port: number;
@@ -18,7 +17,6 @@ class Application {
     private socketService: SocketService;
 
     constructor() {
-        // Placeholder for environment configuration (e.g., from .env)
         this.port = process.env.PORT ? parseInt(process.env.PORT, 10) : 3003;
         this.app = express();
         this.socketService = SocketService.getInstance();
@@ -56,7 +54,15 @@ class Application {
         // Enable CORS
         this.app.use(cors());
         
+        // Parse JSON bodies
         this.app.use(express.json());
+
+        // Add request logging
+        this.app.use((req, res, next) => {
+            console.log(`${req.method} ${req.path}`);
+            next();
+        });
+
         console.log('Middleware initialized');
     }
 
@@ -64,8 +70,14 @@ class Application {
      * Configures application routes.
      */
     private setupRoutes(): void {
-        this.app.use('/api', testRoutes);
-        this.app.use('/api', streamRoutes);
+        // Mount all routes under /api
+        this.app.use('/api', routes);
+        
+        // Handle 404
+        this.app.use((req, res) => {
+            res.status(404).json({ error: 'Not Found' });
+        });
+
         console.log('Routes configured');
     }
 
@@ -83,7 +95,7 @@ class Application {
         this.httpServer.listen(this.port, () => {
             console.log(`Server is running on port ${this.port}`);
             console.log(`WebSocket endpoint: ws://localhost:${this.port}/api/stream`);
-            console.log(`Test Qdrant connection at: http://localhost:${this.port}/api/test-qdrant`);
+            console.log(`API endpoint: http://localhost:${this.port}/api`);
         });
 
         // Handle graceful shutdown

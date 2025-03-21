@@ -1,8 +1,8 @@
-import { Router } from 'express';
+import express from 'express';
 import { testQdrantConnection } from '../controllers/testController';
 
-const router = Router();
+const router = express.Router();
 
-router.get('/test-qdrant', testQdrantConnection);
+router.get('/qdrant', testQdrantConnection);
 
 export default router; 

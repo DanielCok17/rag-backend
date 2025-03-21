@@ -45,7 +45,14 @@ class ChatService {
             }
 
             // Save the question and answer to the conversation history
-            await storageService.saveMessage(conversation.id, { question, answer: finalAnswer });
+            await storageService.saveMessage(conversation.id, {
+                role: 'user',
+                content: question
+            });
+            await storageService.saveMessage(conversation.id, {
+                role: 'assistant',
+                content: finalAnswer
+            });
 
             // Check if the user is correcting a previous question
             if (this.isCorrection(question)) {
@@ -172,7 +179,7 @@ class ChatService {
      * Decides if RAG is needed for a continuation based on history.
      */
     private needsRagForContinuation(history: ChatMessage[]): boolean {
-        return history.some(msg => /law|ruling|legal/i.test(msg.question));
+        return history.some(msg => /law|ruling|legal/i.test(msg.content));
     }
 
     /**
@@ -188,6 +195,26 @@ class ChatService {
      */
     private isSpecialCommand(question: string): boolean {
         return /summarize|sum up|save|export/i.test(question);
+    }
+
+    /**
+     * Creates a user message for the chat history.
+     */
+    private createUserMessage(content: string): ChatMessage {
+        return {
+            role: 'user',
+            content: content
+        };
+    }
+
+    /**
+     * Creates an assistant message for the chat history.
+     */
+    private createAssistantMessage(content: string): ChatMessage {
+        return {
+            role: 'assistant',
+            content: content
+        };
     }
 }
 

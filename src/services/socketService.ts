@@ -1,15 +1,23 @@
-import { WebSocketServer, WebSocket } from 'ws';
+import WebSocket from 'ws';
 import { Server as HttpServer } from 'http';
 import { IncomingMessage } from 'http';
 import { parse as parseUrl } from 'url';
+import OpenAIService from './openaiService';
+import { WebSocketMessage } from '../types/chat';
+import { ERROR_MESSAGES } from '../config/prompts';
 
 class SocketService {
     private static instance: SocketService;
-    private wss: WebSocketServer | null = null;
-    private clients: Map<string, WebSocket> = new Map();
-    private clientCounter: number = 0;
+    private wss: WebSocket.Server;
+    private sockets: Map<string, WebSocket>;
+    private openAIService: OpenAIService;
 
-    private constructor() {}
+    private constructor() {
+        this.wss = new WebSocket.Server({ noServer: true });
+        this.sockets = new Map();
+        this.openAIService = OpenAIService.getInstance();
+        this.setupWebSocketServer();
+    }
 
     public static getInstance(): SocketService {
         if (!SocketService.instance) {
@@ -19,124 +27,149 @@ class SocketService {
     }
 
     public initialize(server: HttpServer): void {
-        this.wss = new WebSocketServer({ 
-            noServer: true,
-            path: "/api/stream"
-        });
-
         server.on('upgrade', (request: IncomingMessage, socket: any, head: Buffer) => {
             const { pathname } = parseUrl(request.url || '');
 
             if (pathname === '/api/stream') {
-                this.wss?.handleUpgrade(request, socket, head, (ws) => {
-                    this.wss?.emit('connection', ws, request);
+                this.wss.handleUpgrade(request, socket, head, (ws) => {
+                    this.wss.emit('connection', ws, request);
                 });
             } else {
                 socket.destroy();
             }
         });
 
-        this.wss.on('connection', (ws: WebSocket, request: IncomingMessage) => {
-            const clientId = `client_${++this.clientCounter}`;
-            this.clients.set(clientId, ws);
-
-            console.log('Client connected:', clientId);
-
-            // Send connection confirmation
-            this.sendToClient(clientId, {
-                type: 'connected',
-                clientId: clientId,
-                timestamp: new Date().toISOString()
-            });
-
-            ws.on('message', (data: string) => {
-                try {
-                    const parsedData = JSON.parse(data.toString());
-                    this.handleMessage(clientId, parsedData);
-                } catch (error) {
-                    console.error('Error parsing message:', error);
-                    this.sendError(clientId, 'Invalid message format');
-                }
-            });
-
-            ws.on('close', () => {
-                console.log('Client disconnected:', clientId);
-                this.clients.delete(clientId);
-            });
-
-            ws.on('error', (error) => {
-                console.error('WebSocket error:', error);
-                this.sendError(clientId, 'WebSocket error occurred');
-            });
-        });
-
         console.log('WebSocket server initialized at /api/stream');
     }
 
-    private handleMessage(clientId: string, data: any) {
-        if (data.type === 'question') {
-            this.handleStreamStart(clientId, data.question);
-        } else {
-            this.sendToClient(clientId, {
-                type: 'echo',
-                data: data,
-                timestamp: new Date().toISOString()
-            });
-        }
-    }
-
-    private async handleStreamStart(clientId: string, question: string) {
-        try {
-            console.log('Processing question:', question);
-            // Mock streaming response for testing
-            const mockResponse = "This is a test streaming response for: " + question;
-            for (const char of mockResponse) {
-                await new Promise(resolve => setTimeout(resolve, 100));
-                this.sendStreamChunk(clientId, char);
+    private setupWebSocketServer(): void {
+        this.wss.on('connection', (ws: WebSocket, request: IncomingMessage) => {
+            const socketId = this.extractSocketId(request);
+            if (!socketId) {
+                ws.close(1008, 'Socket ID is required');
+                return;
             }
-            this.sendStreamComplete(clientId, { 
-                message: 'Stream completed',
-                question: question
-            });
+
+            this.handleNewConnection(ws, socketId);
+        });
+    }
+
+    private extractSocketId(request: IncomingMessage): string | null {
+        return request.headers['x-socket-id'] as string || null;
+    }
+
+    private handleNewConnection(ws: WebSocket, socketId: string): void {
+        console.log(`Client connected with socket ID: ${socketId}`);
+        this.sockets.set(socketId, ws);
+
+        this.setupMessageHandler(ws, socketId);
+        this.setupCloseHandler(ws, socketId);
+        this.sendConnectionConfirmation(socketId);
+    }
+
+    private setupMessageHandler(ws: WebSocket, socketId: string): void {
+        ws.on('message', async (message: Buffer) => {
+            try {
+                const data = JSON.parse(message.toString());
+                console.log('Received message:', data);
+                
+                const questionContent = data.content || data.question;
+                
+                if (data.type === 'question' && questionContent) {
+                    await this.handleQuestion(socketId, questionContent);
+                } else {
+                    throw new Error('Invalid message format: missing type or question content');
+                }
+            } catch (error) {
+                console.error('Error processing message:', error);
+                this.sendError(socketId, error instanceof Error ? error.message : 'Failed to process message');
+            }
+        });
+    }
+
+    private setupCloseHandler(ws: WebSocket, socketId: string): void {
+        ws.on('close', () => {
+            console.log(`Client disconnected: ${socketId}`);
+            this.sockets.delete(socketId);
+        });
+    }
+
+    private sendConnectionConfirmation(socketId: string): void {
+        this.sendMessage(socketId, {
+            type: 'start',
+            content: 'Connected to WebSocket server'
+        });
+    }
+
+    private async handleQuestion(socketId: string, question: string): Promise<void> {
+        try {
+            this.validateQuestion(question);
+            console.log(`Processing question for socket ${socketId}:`, question);
+
+            await this.processQuestion(socketId, question);
         } catch (error) {
-            console.error('Streaming error:', error);
-            this.sendError(clientId, error instanceof Error ? error.message : 'Unknown error occurred');
+            console.error(`Error handling question for socket ${socketId}:`, error);
+            this.sendError(socketId, error instanceof Error ? error.message : 'Failed to process question');
         }
     }
 
-    private sendToClient(clientId: string, data: any): void {
-        const client = this.clients.get(clientId);
-        if (client?.readyState === WebSocket.OPEN) {
-            client.send(JSON.stringify(data));
+    private validateQuestion(question: string): void {
+        if (!question || typeof question !== 'string') {
+            throw new Error(ERROR_MESSAGES.INVALID_QUESTION);
         }
     }
 
-    public sendStreamChunk(clientId: string, chunk: string): void {
-        this.sendToClient(clientId, {
-            type: 'chunk',
-            data: chunk,
-            timestamp: new Date().toISOString()
+    private async processQuestion(socketId: string, question: string): Promise<void> {
+        this.sendMessage(socketId, {
+            type: 'start',
+            content: 'Processing your question...'
         });
-    }
 
-    public sendStreamComplete(clientId: string, data: any): void {
-        this.sendToClient(clientId, {
+        await this.openAIService.streamResponse(question, (chunk: string) => {
+            if (chunk) {
+                this.sendMessage(socketId, {
+                    type: 'chunk',
+                    content: chunk
+                });
+            }
+        });
+
+        this.sendMessage(socketId, {
             type: 'complete',
-            ...data,
-            timestamp: new Date().toISOString()
+            content: 'Response completed'
         });
     }
 
-    public sendError(clientId: string, error: string): void {
-        this.sendToClient(clientId, {
+    private sendMessage(socketId: string, message: WebSocketMessage): void {
+        const ws = this.sockets.get(socketId);
+        if (ws && ws.readyState === WebSocket.OPEN) {
+            ws.send(JSON.stringify(message));
+        }
+    }
+
+    public sendError(socketId: string, error: string): void {
+        this.sendMessage(socketId, {
             type: 'error',
-            message: error,
-            timestamp: new Date().toISOString()
+            error: error
         });
     }
 
-    public getConnectedClients(): string[] {
-        return Array.from(this.clients.keys());
+    public sendStreamChunk(socketId: string, content: string): void {
+        this.sendMessage(socketId, {
+            type: 'chunk',
+            content: content
+        });
+    }
+
+    public sendStreamComplete(socketId: string, data: any): void {
+        this.sendMessage(socketId, {
+            type: 'complete',
+            ...data
+        });
+    }
+
+    public getWSS(): WebSocket.Server {
+        return this.wss;
     }
 }
 

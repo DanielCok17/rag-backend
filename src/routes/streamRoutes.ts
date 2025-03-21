@@ -3,6 +3,7 @@ import { startStreaming } from '../controllers/streamController';
 
 const router = express.Router();
 
-router.post('/stream', startStreaming as RequestHandler);
+// Handle streaming requests
+router.post('/', startStreaming as RequestHandler);
 
 export default router; 

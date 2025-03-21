@@ -1,6 +1,7 @@
 import { Request, Response } from 'express';
 import QdrantClientSingleton from '../db/qdrantClient';
 import SocketService from '../services/socketService';
+import OpenAIService from '../services/openaiService';
 
 export const startStreaming = async (req: Request, res: Response) => {
     const { question } = req.body;
@@ -16,6 +17,7 @@ export const startStreaming = async (req: Request, res: Response) => {
 
     try {
         const socketService = SocketService.getInstance();
+        const openaiService = OpenAIService.getInstance();
         
         // Start the streaming process
         const client = QdrantClientSingleton.getInstance();
@@ -26,27 +28,21 @@ export const startStreaming = async (req: Request, res: Response) => {
             limit: 5
         });
 
-        // Send the search results as chunks
+        // Send the search results
         socketService.sendStreamChunk(socketId, JSON.stringify({
             type: 'search_results',
             data: searchResult
         }));
 
-        // Here you would typically:
-        // 1. Process the search results
-        // 2. Generate a response using your LLM
-        // 3. Stream the response chunks
+        // Stream the AI response
+        await openaiService.streamResponse(question, (chunk) => {
+            socketService.sendStreamChunk(socketId, chunk);
+        });
 
-        // For demonstration, let's send some mock chunks
-        const mockResponse = "This is a mock streaming response...";
-        for (let i = 0; i < mockResponse.length; i++) {
-            await new Promise(resolve => setTimeout(resolve, 100)); // Simulate processing time
-            socketService.sendStreamChunk(socketId, mockResponse[i]);
-        }
-
-        // Send completion
+        // Send completion message
         socketService.sendStreamComplete(socketId, {
             message: 'Streaming completed',
+            question: question,
             timestamp: new Date().toISOString()
         });
 
