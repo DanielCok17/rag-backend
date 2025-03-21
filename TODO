@@ -67,3 +67,14 @@ This file tracks the remaining tasks to be implemented for the rag-ai-lawyer pro
 - Tasks are prioritized by dependency (e.g., Qdrant setup before retrieval logic).
 - Mark tasks as `[DONE]` when completed, and add new tasks as needed.
 - Review and adjust priorities based on testing and feedback.
+
+
+
+
+1. Poozivatel zada otazku
+2. Zistime ci:
+   1. Je to novy chat alebo pokracujuci
+   2. Je to pravna otazka alebo vseobecna
+   3. Ci sa ma spracit RAG
+   4. Je to otazka na konretny zakon - nerobi sa rag, iba conclusion 
+   5. 
