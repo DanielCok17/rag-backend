@@ -5,6 +5,8 @@ import { parse as parseUrl } from 'url';
 import OpenAIService from './openaiService';
 import { WebSocketMessage } from '../types/chat';
 import { ERROR_MESSAGES } from '../config/prompts';
+import { Request, Response } from 'express';
+import { handleQuestion } from '../controllers/streamController';
 
 class SocketService {
     private static instance: SocketService;
@@ -61,6 +63,9 @@ class SocketService {
     private handleNewConnection(ws: WebSocket, socketId: string): void {
         console.log(`Client connected with socket ID: ${socketId}`);
         this.sockets.set(socketId, ws);
+        
+        // Set the socketId property on the WebSocket instance
+        (ws as WebSocket & { socketId?: string }).socketId = socketId;
 
         this.setupMessageHandler(ws, socketId);
         this.setupCloseHandler(ws, socketId);
@@ -120,24 +125,15 @@ class SocketService {
     }
 
     private async processQuestion(socketId: string, question: string): Promise<void> {
-        this.sendMessage(socketId, {
-            type: 'start',
-            content: 'Processing your question...'
-        });
+        const ws = this.sockets.get(socketId);
+        if (!ws) {
+            throw new Error('WebSocket connection not found');
+        }
 
-        await this.openAIService.streamResponse(question, (chunk: string) => {
-            if (chunk) {
-                this.sendMessage(socketId, {
-                    type: 'chunk',
-                    content: chunk
-                });
-            }
-        });
+        // Set the socketId property on the WebSocket instance
+        (ws as WebSocket & { socketId?: string }).socketId = socketId;
 
-        this.sendMessage(socketId, {
-            type: 'complete',
-            content: 'Response completed'
-        });
+        await handleQuestion(ws, question);
     }
 
     private sendMessage(socketId: string, message: WebSocketMessage): void {
@@ -170,6 +166,20 @@ class SocketService {
 
     public getWSS(): WebSocket.Server {
         return this.wss;
+    }
+
+    public startStreaming(req: Request, res: Response): void {
+        const { headers } = req;
+        const socketId = headers['x-socket-id'] as string;
+
+        if (!socketId) {
+            res.status(400).json({ error: 'Socket ID is required' });
+            return;
+        }
+
+        this.wss.handleUpgrade(req, req.socket, Buffer.alloc(0), (ws) => {
+            this.handleNewConnection(ws, socketId);
+        });
     }
 }
 

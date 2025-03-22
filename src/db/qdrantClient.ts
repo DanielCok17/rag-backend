@@ -22,16 +22,12 @@ interface VectorConfig {
   distance: 'Cosine' | 'Euclid' | 'Dot' | 'Manhattan';
 }
 
-class QdrantClientSingleton {
-  private static instance: QdrantClient | null = null;
-
-  public static readonly COLLECTION_NAME: string =
-    process.env.QDRANT_COLLECTION || '500_chunk_size_10_overlap_court_judgements';
-
-  private static readonly config: QdrantConfig = {
+export class QdrantClientSingleton {
+  private static instance: QdrantClient;
+  private static readonly config = {
     host: process.env.QDRANT_HOST || 'localhost',
     port: process.env.QDRANT_PORT || '6333',
-    collectionName: QdrantClientSingleton.COLLECTION_NAME
+    collection: process.env.QDRANT_COLLECTION || '500_chunk_size_10_overlap_court_judgements'
   };
 
   private static readonly baseUrl = `http://${QdrantClientSingleton.config.host}:${QdrantClientSingleton.config.port}`;
@@ -45,59 +41,49 @@ class QdrantClientSingleton {
         timeout: 30000,
       });
       console.log(`Qdrant client initialized at: ${QdrantClientSingleton.baseUrl}`);
+      console.log('Using Qdrant collection:', QdrantClientSingleton.config.collection);
     }
     return QdrantClientSingleton.instance;
   }
 
-  public static async collectionExists(collectionName: string = this.COLLECTION_NAME): Promise<boolean> {
+  public static getCollectionName(): string {
+    return QdrantClientSingleton.config.collection;
+  }
+
+  public static async collectionExists(collectionName: string = this.config.collection): Promise<boolean> {
     try {
-      const client = this.getInstance();
-      const collections: CollectionsList = await client.getCollections();
-      return collections.collections.some(coll => coll.name === collectionName);
+      const client = QdrantClientSingleton.getInstance();
+      const collections = await client.getCollections();
+      return collections.collections.some(c => c.name === collectionName);
     } catch (error) {
-      console.error(`Error checking collection: ${error}`);
-      throw error;
+      console.error('Error checking collection existence:', error);
+      return false;
     }
   }
 
-  public static async createCollection(
-    collectionName: string = this.COLLECTION_NAME,
-    size: number = 3072,
-    distance: 'Cosine' | 'Euclid' | 'Dot' | 'Manhattan' = 'Cosine'
-  ): Promise<void> {
-    try {
-      const client = this.getInstance();
-      await client.createCollection(collectionName, {
-        vectors: {
-          size: size,
-          distance: distance
-        }
-      });
-      console.log(`Collection '${collectionName}' created`);
-    } catch (error) {
-      console.error(`Error creating collection: ${error}`);
-      throw error;
-    }
-  }
+  public static async waitForCollection(collectionName: string = this.config.collection): Promise<void> {
+    const maxAttempts = 30;
+    const delayMs = 1000;
+    let attempts = 0;
 
-  public static async ensureCollection(recreate: boolean = false): Promise<void> {
-    try {
-      if (recreate) {
-      } else if (!(await this.collectionExists())) {
-        await this.createCollection();
+    while (attempts < maxAttempts) {
+      const exists = await QdrantClientSingleton.collectionExists(collectionName);
+      if (exists) {
+        console.log(`Collection '${collectionName}' ready`);
+        return;
       }
-      console.log(`Collection '${this.COLLECTION_NAME}' ready`);
-    } catch (error) {
-      console.error(`Error ensuring collection: ${error}`);
-      throw error;
+      await new Promise(resolve => setTimeout(resolve, delayMs));
+      attempts++;
     }
+
+    throw new Error(`Collection '${collectionName}' not found after ${maxAttempts} attempts`);
   }
 }
 
 // Usage in index.ts
 async function bootstrap() {
   try {
-    await QdrantClientSingleton.ensureCollection(false); // false = don't recreate if exists
+    await QdrantClientSingleton.waitForCollection();
     console.log('Application started successfully');
   } catch (error) {
     console.error('Failed to start application:', error);

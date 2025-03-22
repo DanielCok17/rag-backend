@@ -1,43 +1,39 @@
 import { Request, Response } from 'express';
-import QdrantClientSingleton from '../db/qdrantClient';
+import { QdrantClientSingleton } from '../db/qdrantClient';
 
 export const testQdrantConnection = async (req: Request, res: Response) => {
     try {
         const client = QdrantClientSingleton.getInstance();
-        
-        // Ensure collection exists with proper configuration
-        await QdrantClientSingleton.ensureCollection(true); // Recreate collection to ensure proper configuration
-        
-        // Get collection info
-        const collectionInfo = await client.getCollection(QdrantClientSingleton.COLLECTION_NAME);
-        
-        // Get collection statistics
-        const stats = await client.getCollection(QdrantClientSingleton.COLLECTION_NAME);
-        
-        // Perform a simple search with a test vector (random vector for testing)
-        const testVector = Array(3072).fill(0).map(() => Math.random() * 2 - 1);
-        const searchResult = await client.search(QdrantClientSingleton.COLLECTION_NAME, {
-            vector: testVector,
-            limit: 1
+        const collectionName = QdrantClientSingleton.getCollectionName();
+
+        // Test collection info
+        const collectionInfo = await client.getCollection(collectionName);
+        console.log('Collection info:', collectionInfo);
+
+        // Test collection stats
+        const stats = await client.getCollection(collectionName);
+        console.log('Collection stats:', stats);
+
+        // Test search
+        const searchResult = await client.search(collectionName, {
+            vector: new Array(1536).fill(0),
+            limit: 1,
+            with_payload: true
         });
+        console.log('Search result:', searchResult);
 
         res.json({
             status: 'success',
-            message: 'Qdrant connection is working',
-            collectionInfo: {
-                name: QdrantClientSingleton.COLLECTION_NAME,
-                pointsCount: stats.points_count,
-                vectorsConfig: stats.config.params.vectors
-            },
-            searchTest: {
-                result: searchResult[0] ? {
-                    score: searchResult[0].score,
-                    id: searchResult[0].id
-                } : null
+            message: 'Qdrant connection test successful',
+            collection: {
+                name: collectionName,
+                info: collectionInfo,
+                stats: stats,
+                searchTest: searchResult
             }
         });
     } catch (error) {
-        console.error('Qdrant test failed:', error);
+        console.error('Error testing Qdrant connection:', error);
         res.status(500).json({
             status: 'error',
             message: 'Failed to test Qdrant connection',

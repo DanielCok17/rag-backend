@@ -5,32 +5,20 @@ import { ChatPromptTemplate } from '@langchain/core/prompts';
 import dotenv from 'dotenv';
 import { ChatMessage } from '../types/chat';
 import { SYSTEM_PROMPTS, MODEL_CONFIG, ERROR_MESSAGES } from '../config/prompts';
+import { monitoringService } from './monitoringService';
 
 dotenv.config();
 
 class OpenAIService {
     private static instance: OpenAIService;
-    private openai!: OpenAI;
-    private model!: ChatOpenAI;
-    private readonly apiKey: string;
+    private openai: OpenAI;
+    private model: string;
 
     private constructor() {
-        this.apiKey = process.env.OPENAI_API_KEY || '';
-        if (!this.apiKey) {
-            throw new Error(ERROR_MESSAGES.API_KEY_MISSING);
-        }
-
-        this.initializeOpenAI();
-    }
-
-    private initializeOpenAI(): void {
-        this.openai = new OpenAI({ apiKey: this.apiKey });
-        this.model = new ChatOpenAI({
-            openAIApiKey: this.apiKey,
-            modelName: process.env.OPENAI_MODEL || MODEL_CONFIG.DEFAULT_MODEL,
-            temperature: MODEL_CONFIG.TEMPERATURE,
-            streaming: true,
+        this.openai = new OpenAI({
+            apiKey: process.env.OPENAI_API_KEY
         });
+        this.model = process.env.OPENAI_MODEL || MODEL_CONFIG.DEFAULT_MODEL;
     }
 
     public static getInstance(): OpenAIService {
@@ -50,14 +38,16 @@ class OpenAIService {
     public async streamResponse(
         question: string, 
         onChunk: (chunk: string) => void,
-        systemPrompt: string = SYSTEM_PROMPTS.DEFAULT
+        systemPrompt: string = SYSTEM_PROMPTS.DEFAULT,
+        conversationId: string
     ): Promise<void> {
         try {
-            console.log('Starting OpenAI stream for question:', question);
+            console.log('Začínam OpenAI stream pre otázku:', question);
             let fullResponse = '';
             
+            const promptId = monitoringService.startPromptTracking(conversationId);
             const stream = await this.openai.chat.completions.create({
-                model: process.env.OPENAI_MODEL || MODEL_CONFIG.DEFAULT_MODEL,
+                model: this.model,
                 messages: this.createMessages(question, systemPrompt),
                 stream: true,
                 temperature: MODEL_CONFIG.TEMPERATURE,
@@ -71,8 +61,22 @@ class OpenAIService {
                     onChunk(content);
                 }
             }
-            console.log('OpenAI response:', fullResponse);
-            console.log('OpenAI stream completed');
+
+            // Get token counts from the last chunk
+            const lastChunk = await this.openai.chat.completions.create({
+                model: this.model,
+                messages: this.createMessages(question, systemPrompt),
+                temperature: MODEL_CONFIG.TEMPERATURE,
+                max_tokens: MODEL_CONFIG.MAX_TOKENS
+            });
+
+            const tokens = {
+                prompt: lastChunk.usage?.prompt_tokens || 0,
+                completion: lastChunk.usage?.completion_tokens || 0
+            };
+
+            monitoringService.endPromptTracking(conversationId, promptId, tokens, this.model);
+            console.log('OpenAI stream dokončený');
         } catch (error) {
             console.error(ERROR_MESSAGES.STREAMING_ERROR, error);
             throw error;
@@ -81,17 +85,27 @@ class OpenAIService {
 
     public async generateResponse(
         question: string,
-        systemPrompt: string = SYSTEM_PROMPTS.DEFAULT
+        systemPrompt: string = SYSTEM_PROMPTS.DEFAULT,
+        conversationId: string
     ): Promise<string> {
         try {
+            const promptId = monitoringService.startPromptTracking(conversationId);
+            
             const completion = await this.openai.chat.completions.create({
-                model: process.env.OPENAI_MODEL || MODEL_CONFIG.DEFAULT_MODEL,
+                model: this.model,
                 messages: this.createMessages(question, systemPrompt),
                 temperature: MODEL_CONFIG.TEMPERATURE,
                 max_tokens: MODEL_CONFIG.MAX_TOKENS
             });
 
-            return completion.choices[0]?.message?.content || 'No response generated';
+            const tokens = {
+                prompt: completion.usage?.prompt_tokens || 0,
+                completion: completion.usage?.completion_tokens || 0
+            };
+
+            monitoringService.endPromptTracking(conversationId, promptId, tokens, this.model);
+
+            return completion.choices[0]?.message?.content || 'Žiadna odpoveď nebola vygenerovaná';
         } catch (error) {
             console.error(ERROR_MESSAGES.GENERATION_ERROR, error);
             throw error;

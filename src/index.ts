@@ -30,8 +30,8 @@ class Application {
      */
     private async initialize(): Promise<void> {
         try {
-            // Initialize Qdrant connection
-            await QdrantClientSingleton.ensureCollection(false);
+            // Initialize Qdrant collection
+            await QdrantClientSingleton.waitForCollection();
 
             // Setup middleware
             this.setupMiddleware();

@@ -1,56 +1,101 @@
 import { Request, Response } from 'express';
-import QdrantClientSingleton from '../db/qdrantClient';
-import SocketService from '../services/socketService';
+import { WebSocket } from 'ws';
 import OpenAIService from '../services/openaiService';
+import { chatService } from '../services/chatService';
+import { retrievalService } from '../services/retrievalService';
 
-export const startStreaming = async (req: Request, res: Response) => {
-    const { question } = req.body;
-    const socketId = req.headers['x-socket-id'] as string;
+const openAIService = OpenAIService.getInstance();
 
-    if (!socketId) {
-        return res.status(400).json({ error: 'Socket ID is required' });
-    }
+export const startStreaming = (req: Request, res: Response) => {
+    res.status(200).json({ message: 'Streaming endpoint ready' });
+};
 
-    if (!question) {
-        return res.status(400).json({ error: 'Question is required' });
-    }
-
+export const handleQuestion = async (socket: WebSocket & { socketId?: string }, question: string) => {
     try {
-        const socketService = SocketService.getInstance();
-        const openaiService = OpenAIService.getInstance();
-        
-        // Start the streaming process
-        const client = QdrantClientSingleton.getInstance();
-        
-        // Search for relevant documents
-        const searchResult = await client.search(QdrantClientSingleton.COLLECTION_NAME, {
-            vector: Array(3072).fill(0), // Replace with actual embedding
-            limit: 5
-        });
+        console.log('\n🚀 ===== STARTING QUESTION PROCESSING =====');
+        console.log('📝 Question:', question);
+        console.log('🔑 Socket ID:', socket.socketId);
+        console.log('=====================================\n');
 
-        // Send the search results
-        socketService.sendStreamChunk(socketId, JSON.stringify({
-            type: 'search_results',
-            data: searchResult
+        // Create a new conversation ID for this stream
+        const conversationId = `stream_${Date.now()}`;
+
+        // Get classification and reasoning from OpenAI
+        console.log('🤖 Starting OpenAI Classification...');
+        const { classification, reasoning } = await chatService.classifyQuestionWithOpenAI(question, []);
+        
+        console.log('\n📊 ===== CLASSIFICATION RESULTS =====');
+        console.log('📌 Type:', classification);
+        console.log('🔍 Analysis:', reasoning);
+        console.log('🛣️ Processing Path:', chatService.getProcessingPath(classification));
+        console.log('=====================================\n');
+
+        // Send start message
+        socket.send(JSON.stringify({
+            type: 'start',
+            message: 'Processing your question...'
         }));
 
-        // Stream the AI response
-        await openaiService.streamResponse(question, (chunk) => {
-            socketService.sendStreamChunk(socketId, chunk);
-        });
+        // Process based on classification
+        let response: string;
+        switch (classification) {
+            case 'specific_document':
+                console.log('\n🔍 ===== USING RAG: SPECIFIC DOCUMENT SEARCH =====');
+                console.log('📚 Searching for relevant sections in legal documents...');
+                response = await retrievalService.getSpecificDocument(question, conversationId);
+                console.log('✅ RAG Processing Complete');
+                console.log('==============================================\n');
+                break;
+            case 'legal_analysis':
+                console.log('\n🔍 ===== USING RAG: LEGAL ANALYSIS =====');
+                console.log('📚 Retrieving relevant legal context...');
+                response = await chatService.handleLegalAnalysis(question, [], conversationId);
+                console.log('✅ RAG Processing Complete');
+                console.log('=====================================\n');
+                break;
+            case 'general':
+                console.log('\n⚠️ ===== NO RAG: DIRECT OPENAI RESPONSE =====');
+                console.log('ℹ️ Question does not require legal document context');
+                response = await chatService.generateDirectAnswer(question, []);
+                console.log('=====================================\n');
+                break;
+            case 'continuation':
+                console.log('\n🔄 ===== PROCESSING CONTINUATION =====');
+                console.log('📝 Using conversation history for context');
+                response = await chatService.handleContinuation(question, []);
+                console.log('=====================================\n');
+                break;
+            case 'special_command':
+                console.log('\n⚙️ ===== PROCESSING SPECIAL COMMAND =====');
+                response = await chatService.handleSpecialCommand(question, []);
+                console.log('=====================================\n');
+                break;
+            default:
+                console.log('\n⚠️ ===== UNKNOWN TYPE: FALLING BACK =====');
+                console.log('ℹ️ Using direct OpenAI response without RAG');
+                response = await chatService.generateDirectAnswer(question, []);
+                console.log('=====================================\n');
+        }
+
+        // Stream the response
+        console.log('📤 Sending response to client...');
+        socket.send(JSON.stringify({
+            type: 'chunk',
+            content: response
+        }));
 
         // Send completion message
-        socketService.sendStreamComplete(socketId, {
-            message: 'Streaming completed',
-            question: question,
-            timestamp: new Date().toISOString()
-        });
+        socket.send(JSON.stringify({
+            type: 'complete',
+            message: 'Question processing completed'
+        }));
 
-        res.json({ message: 'Streaming started' });
+        console.log('✅ ===== QUESTION PROCESSING COMPLETE =====\n');
     } catch (error) {
-        console.error('Streaming error:', error);
-        const socketService = SocketService.getInstance();
-        socketService.sendError(socketId, error instanceof Error ? error.message : 'Unknown error occurred');
-        res.status(500).json({ error: 'Failed to start streaming' });
+        console.error('❌ Error processing question:', error);
+        socket.send(JSON.stringify({
+            type: 'error',
+            message: 'An error occurred while processing your question'
+        }));
     }
 }; 
