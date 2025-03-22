@@ -21,6 +21,14 @@ interface SearchResult {
     };
 }
 
+interface ConversationContext {
+    history: ChatMessage[];
+    previousDocuments: SearchResult[];
+    previousDomain: string;
+    previousQuery: string;
+    timestamp: number;
+}
+
 class RetrievalService {
     private static instance: RetrievalService;
     private vectorStore: QdrantVectorStore;
@@ -28,16 +36,19 @@ class RetrievalService {
     private openAIService: OpenAIService;
     private readonly COLLECTION_NAME = process.env.QDRANT_COLLECTION || '500_chunk_size_10_overlap_court_judgements';
     private readonly BASE_URL: string;
+    private conversationContexts: Map<string, ConversationContext>;
+    private readonly MAX_HISTORY_LENGTH = 10;
+    private readonly CONTEXT_EXPIRY_MS = 30 * 60 * 1000; // 30 minutes
 
     constructor() {
         const host = process.env.QDRANT_HOST || 'localhost';
         const port = process.env.QDRANT_PORT || '6333';
         this.BASE_URL = `http://${host}:${port}`;
-        
+
         this.embeddings = new OpenAIEmbeddings({
             modelName: EMBEDDING_MODEL
         });
-        
+
         this.vectorStore = new QdrantVectorStore(
             this.embeddings,
             {
@@ -51,9 +62,10 @@ class RetrievalService {
                 }
             }
         );
-        
+
         this.openAIService = OpenAIService.getInstance();
         console.log('Using Qdrant collection:', this.COLLECTION_NAME);
+        this.conversationContexts = new Map();
     }
 
     public static getInstance(): RetrievalService {
@@ -289,15 +301,7 @@ Prosím zahrňte:
 
     private async expandQuery(query: string, conversationId: string): Promise<string> {
         try {
-            const prompt = `Rozšírte túto právnu otázku o relevantné právne termíny a koncepty:
-${query}
-
-Prosím poskytnite rozšírenú verziu otázky, ktorá zahŕňa:
-1. Relevantné právne termíny
-2. Súvisiace koncepty
-3. Špecifické zákony alebo predpisy
-4. Právne oblasti`;
-
+            const prompt = RETRIEVAL_PROMPTS.QUERY_EXPANSION.replace('{query}', query);
             const expandedQuery = await this.openAIService.generateResponse(prompt, SYSTEM_PROMPTS.LEGAL, conversationId);
             return expandedQuery.trim();
         } catch (error) {
@@ -310,7 +314,7 @@ Prosím poskytnite rozšírenú verziu otázky, ktorá zahŕňa:
         try {
             console.log(`\n🔍 Performing similarity search with query: ${query.substring(0, 200)}...`);
             console.log('Filter:', JSON.stringify(filter, null, 2));
-            
+
             // Get raw results from Qdrant client
             const client = this.vectorStore.client;
             const searchResults = await client.search(this.COLLECTION_NAME, {
@@ -321,40 +325,52 @@ Prosím poskytnite rozšírenú verziu otázky, ktorá zahŕňa:
             });
 
             console.log(`✅ Successfully retrieved ${searchResults.length} documents`);
-            
+
             // Log the raw payload structure for debugging
-            searchResults.forEach((result, index) => {
-                console.log(`\n📄 Document ${index + 1} Raw Payload:`, {
-                    score: result.score,
-                    payload: result.payload,
-                    payloadKeys: Object.keys(result.payload || {})
-                });
-            });
+            // searchResults.forEach((result, index) => {
+            //     console.log(`\n📄 Document ${index + 1} Raw Payload:`, {
+            //         score: result.score,
+            //         payload: result.payload,
+            //         payloadKeys: Object.keys(result.payload || {})
+            //     });
+            // });
 
             // Convert Qdrant results to LangChain documents
             const documents = searchResults.map(result => {
-                // Try to get content from different possible locations in the payload
-                let content = '';
                 const payload = result.payload as Record<string, any>;
-                
-                // First try the standard LangChain format
-                if (payload?.pageContent) {
+                let content = '';
+                let metadata = { ...payload };
+
+                // First try to get the actual content from the payload
+                if (payload?.obsah) {
+                    content = payload.obsah;
+                    delete metadata.obsah;
+                }
+                // Then try the standard LangChain format
+                else if (payload?.pageContent) {
                     content = payload.pageContent;
+                    delete metadata.pageContent;
                 }
                 // Then try the raw text field
                 else if (payload?.text) {
                     content = payload.text;
-                }
-                // Then try the obsah field
-                else if (payload?.obsah) {
-                    content = payload.obsah;
+                    delete metadata.text;
                 }
                 // Finally, try to get any text content from the payload
                 else if (payload) {
-                    // Try to find any string value in the payload
+                    // Try to find any string value in the payload that's not metadata
                     for (const [key, value] of Object.entries(payload)) {
-                        if (typeof value === 'string' && value.length > 0) {
+                        if (typeof value === 'string' &&
+                            value.length > 0 &&
+                            !key.toLowerCase().includes('datum') &&
+                            !key.toLowerCase().includes('url') &&
+                            !key.toLowerCase().includes('ecli') &&
+                            !key.toLowerCase().includes('spis') &&
+                            !key.toLowerCase().includes('sud') &&
+                            !key.toLowerCase().includes('type') &&
+                            !key.toLowerCase().includes('chunk')) {
                             content = value;
+                            delete metadata[key];
                             break;
                         }
                     }
@@ -366,20 +382,15 @@ Prosím poskytnite rozšírenú verziu otázky, ktorá zahŕňa:
                 }
 
                 console.log('Final content length:', content.length);
-                
-                // Create a new document with the correct content
+                console.log('Content preview:', content.substring(0, 200) + '...');
+
+                // Create a new document with the correct content and metadata
                 return new Document({
                     pageContent: content,
-                    metadata: {
-                        ...payload,
-                        // Remove content fields from metadata since they're now in pageContent
-                        pageContent: undefined,
-                        text: undefined,
-                        obsah: undefined
-                    }
+                    metadata: metadata
                 });
             });
-            
+
             return documents;
         } catch (error) {
             console.error('❌ Error in similarity search:', error);
@@ -407,89 +418,116 @@ Prosím poskytnite rozšírenú verziu otázky, ktorá zahŕňa:
         return knowledge;
     }
 
+    private getOrCreateContext(conversationId: string): ConversationContext {
+        let context = this.conversationContexts.get(conversationId);
+        
+        if (!context) {
+            context = {
+                history: [],
+                previousDocuments: [],
+                previousDomain: '',
+                previousQuery: '',
+                timestamp: Date.now()
+            };
+            this.conversationContexts.set(conversationId, context);
+        }
+
+        // Clean up expired contexts
+        if (Date.now() - context.timestamp > this.CONTEXT_EXPIRY_MS) {
+            context = {
+                history: [],
+                previousDocuments: [],
+                previousDomain: '',
+                previousQuery: '',
+                timestamp: Date.now()
+            };
+            this.conversationContexts.set(conversationId, context);
+        }
+
+        return context;
+    }
+
+    private updateContext(conversationId: string, updates: Partial<ConversationContext>) {
+        const context = this.getOrCreateContext(conversationId);
+        
+        if (updates.history) {
+            context.history = updates.history.slice(-this.MAX_HISTORY_LENGTH);
+        }
+        if (updates.previousDocuments) {
+            context.previousDocuments = updates.previousDocuments;
+        }
+        if (updates.previousDomain) {
+            context.previousDomain = updates.previousDomain;
+        }
+        if (updates.previousQuery) {
+            context.previousQuery = updates.previousQuery;
+        }
+        
+        context.timestamp = Date.now();
+    }
+
     public async searchRelevantDocuments(query: string, conversationId: string): Promise<SearchResult[]> {
         try {
             const startTime = Date.now();
+            const context = this.getOrCreateContext(conversationId);
             console.log('\n=== Začínam vyhľadávanie relevantných dokumentov ===');
             console.log('Otázka:', query);
+            console.log('Previous query:', context.previousQuery);
+
+            // Combine current query with relevant context from previous documents
+            let searchQuery = query;
+            if (context.previousDocuments.length > 0) {
+                const relevantContext = context.previousDocuments
+                    .map(doc => doc.payload.text)
+                    .join('\n')
+                    .slice(0, 500); // Limit context length
+                searchQuery = `${query}\n\nRelevant context from previous documents:\n${relevantContext}`;
+            }
 
             // Expand the query with relevant legal terms
-            const expandedQuery = await this.expandQuery(query, conversationId);
+            const queryExpansionStart = Date.now();
+            const expandedQuery = await this.expandQuery(searchQuery, conversationId);
             console.log('Rozšírená otázka:', expandedQuery);
+            console.log(`Čas rozšírenia otázky: ${Date.now() - queryExpansionStart}ms`);
 
-            // Initial search with limit of 3
-            let results = await this.safeSimilaritySearch(expandedQuery, 3);
+            // Initial search with limit of 3 and parallel processing
+            const searchStart = Date.now();
+            const [initialResults, caseIds] = await Promise.all([
+                this.safeSimilaritySearch(expandedQuery, 3),
+                this.getUniqueCaseIds(expandedQuery)
+            ]);
+            console.log(`Čas počiatočného vyhľadávania: ${Date.now() - searchStart}ms`);
 
-            // Fallback search if no results
-            if (!results.length) {
-                console.warn('No initial documents retrieved, trying fallback search with increased k');
-                results = await this.safeSimilaritySearch(expandedQuery, 3);
-            }
+            // Fetch all chunks for identified cases in parallel
+            const chunksStart = Date.now();
+            const caseDocsPromises = Array.from(caseIds).map(caseId =>
+                this.fetchCaseChunks(caseId)
+            );
 
-            // Get unique case IDs
-            const caseIds = new Set<string>();
-            for (const doc of results) {
-                const caseId = doc.metadata['Identifikačné číslo spisu'];
-                if (caseId) {
-                    caseIds.add(caseId);
-                }
-            }
+            const caseDocsResults = await Promise.all(caseDocsPromises);
+            console.log(`Čas získavania chunkov: ${Date.now() - chunksStart}ms`);
 
-            console.log(`Identified ${caseIds.size} unique case IDs`);
-
-            // Fetch all chunks for identified cases
+            // Process results
             const allDocs: Document[] = [];
             const conclusions: Document[] = [];
 
-            for (const caseId of caseIds) {
-                try {
-                    console.log(`Fetching all chunks for case ID ${caseId}`);
-                    // Simplified filter structure for Qdrant
-                    const filter = {
-                        must: [
-                            {
-                                key: "Identifikačné číslo spisu",
-                                match: {
-                                    value: caseId
-                                }
-                            }
-                        ]
-                    };
-                    
-                    // Use a simpler query for case-specific search
-                    const caseDocs = await this.safeSimilaritySearch("", 3, filter);
-                    
-                    for (const doc of caseDocs) {
-                        const docType = doc.metadata.type || 'chunk';
-                        if (docType === 'conclusion') {
-                            conclusions.push(doc);
-                        } else {
-                            allDocs.push(doc);
-                        }
-                    }
-                } catch (error) {
-                    console.error(`Error fetching chunks for case ${caseId}:`, error);
-                    continue;
-                }
-            }
+            caseDocsResults.forEach(({ chunks, conclusion }) => {
+                if (chunks) allDocs.push(...chunks);
+                if (conclusion) conclusions.push(conclusion);
+            });
 
             // Fallback to initial documents if no additional chunks
             if (!allDocs.length && !conclusions.length) {
                 console.warn('Failed to fetch additional chunks, using initial documents only');
-                allDocs.push(...results);
+                allDocs.push(...initialResults);
             }
 
             // Sort documents by chunk index
             allDocs.sort((a, b) => (a.metadata.chunk_index || 0) - (b.metadata.chunk_index || 0));
             conclusions.sort((a, b) => (a.metadata.chunk_index || 0) - (b.metadata.chunk_index || 0));
 
-            // Combine chunks and conclusions
-            const knowledgeChunks = allDocs.map(doc => doc.pageContent || doc.metadata.obsah).join('\n\n');
-            const knowledgeConclusions = conclusions.map(doc => doc.pageContent || doc.metadata.obsah).join('\n\n');
-            const knowledge = conclusions.length 
-                ? `### Conclusions\n${knowledgeConclusions}\n\n### Chunks\n${knowledgeChunks}`
-                : knowledgeChunks;
-
+            // Combine chunks and conclusions efficiently
+            const knowledge = this.combineKnowledge(allDocs, conclusions);
             const truncatedKnowledge = this.truncateKnowledge(knowledge);
 
             // Convert to SearchResult type and limit to 3 results
@@ -504,17 +542,20 @@ Prosím poskytnite rozšírenú verziu otázky, ktorá zahŕňa:
                     }
                 }));
 
+            // Update context with new documents
+            this.updateContext(conversationId, {
+                previousDocuments: searchResults,
+                previousQuery: query
+            });
+
             const endTime = Date.now();
-            const duration = endTime - startTime;
-            
-            // Calculate approximate costs (based on OpenAI's pricing)
-            const embeddingCost = (expandedQuery.length / 1000) * 0.0001; // $0.0001 per 1K tokens for text-embedding-3-large
-            const totalCost = embeddingCost;
+            const totalDuration = endTime - startTime;
 
             console.log(`\n=== Request Statistics ===`);
-            console.log(`Duration: ${duration}ms`);
-            console.log(`Approximate Cost: $${totalCost.toFixed(4)}`);
-            console.log(`Documents Retrieved: ${searchResults.length}`);
+            console.log(`Celkový čas: ${totalDuration}ms`);
+            console.log(`Počet získaných dokumentov: ${searchResults.length}`);
+            console.log(`Počet chunkov: ${allDocs.length}`);
+            console.log(`Počet záverov: ${conclusions.length}`);
             console.log(`=====================\n`);
 
             return searchResults;
@@ -522,6 +563,55 @@ Prosím poskytnite rozšírenú verziu otázky, ktorá zahŕňa:
             console.error('Chyba pri vyhľadávaní dokumentov:', error);
             throw error;
         }
+    }
+
+    private async getUniqueCaseIds(query: string): Promise<Set<string>> {
+        const results = await this.safeSimilaritySearch(query, 3);
+        const caseIds = new Set<string>();
+        for (const doc of results) {
+            const caseId = doc.metadata['Identifikačné číslo spisu'];
+            if (caseId) caseIds.add(caseId);
+        }
+        return caseIds;
+    }
+
+    private async fetchCaseChunks(caseId: string): Promise<{ chunks?: Document[], conclusion?: Document }> {
+        try {
+            const filter = {
+                must: [
+                    {
+                        key: "Identifikačné číslo spisu",
+                        match: { value: caseId }
+                    }
+                ]
+            };
+
+            const caseDocs = await this.safeSimilaritySearch("", 3, filter);
+            const chunks: Document[] = [];
+            let conclusion: Document | undefined;
+
+            for (const doc of caseDocs) {
+                if (doc.metadata.type === 'conclusion') {
+                    conclusion = doc;
+                } else {
+                    chunks.push(doc);
+                }
+            }
+
+            return { chunks, conclusion };
+        } catch (error) {
+            console.error(`Error fetching chunks for case ${caseId}:`, error);
+            return {};
+        }
+    }
+
+    private combineKnowledge(allDocs: Document[], conclusions: Document[]): string {
+        const knowledgeChunks = allDocs.map(doc => doc.pageContent || doc.metadata.obsah).join('\n\n');
+        const knowledgeConclusions = conclusions.map(doc => doc.pageContent || doc.metadata.obsah).join('\n\n');
+
+        return conclusions.length
+            ? `### Conclusions\n${knowledgeConclusions}\n\n### Chunks\n${knowledgeChunks}`
+            : knowledgeChunks;
     }
 
     private async generateSummary(results: SearchResult[], conversationId: string): Promise<string> {
@@ -549,47 +639,106 @@ Prosím poskytnite:
      * @returns Formatted string of search results.
      */
     public formatSearchResults(results: SearchResult[]): string {
-        console.log('\n📝 ===== FORMATTING SEARCH RESULTS =====');
-        
+        // Create summary section efficiently
+        const summarySection = results.map((result, index) => {
+            const { text, metadata } = result.payload;
+            // Extract metadata from content if not in metadata
+            const content = text || '';
+            const caseNumber = metadata['Spisová značka'] || this.extractFromContent(content, 'Spisová značka:');
+            const decisionDate = metadata['Dátum rozhodnutia'] || this.extractFromContent(content, 'Dátum rozhodnutia:');
+            const court = metadata.Súd || this.extractFromContent(content, 'Súd:');
+            const url = metadata.URL || this.extractFromContent(content, 'Url:');
+            return `Case ${index + 1}: ${court} - ${caseNumber} (${decisionDate})
+URL: ${url}`;
+        }).join('\n');
+
+        // Format documents efficiently
         const formattedResults = results.map((result, index) => {
             const { text, metadata } = result.payload;
-            console.log(`\n📄 Formatting Document ${index + 1}:`);
-            console.log('Raw Metadata:', JSON.stringify(metadata, null, 2));
-            
-            // Decode and format the content
             const content = text || 'No content available';
+
+            // Extract metadata from content if not in metadata
+            const caseNumber = metadata['Spisová značka'] || this.extractFromContent(content, 'Spisová značka:');
+            const decisionDate = metadata['Dátum rozhodnutia'] || this.extractFromContent(content, 'Dátum rozhodnutia:');
+            const court = metadata.Súd || this.extractFromContent(content, 'Súd:');
+            const judge = metadata.Sudca || this.extractFromContent(content, 'Sudca:');
+            const ecli = metadata['ECLI (Európsky identifikátor judikatúry)'] || this.extractFromContent(content, 'ECLI (Európsky identifikátor judikatúry):');
+            const url = metadata.URL || this.extractFromContent(content, 'Url:');
+            const caseId = metadata['Identifikačné číslo spisu'] || this.extractFromContent(content, 'Identifikačné číslo spisu:');
+            const docType = metadata.type || this.extractFromContent(content, 'Type:');
+            const chunkIndex = metadata.chunk_index || this.extractFromContent(content, 'Chunk Index:');
+            const areaOfLaw = metadata['Oblasť právnej úpravy'] || this.extractFromContent(content, 'Oblasť právnej úpravy:');
+            const subAreaOfLaw = metadata['Podoblasť právnej úpravy'] || this.extractFromContent(content, 'Podoblasť právnej úpravy:');
+            const natureOfDecision = metadata['Povaha rozhodnutia'] || this.extractFromContent(content, 'Povaha rozhodnutia:');
+            const decisionForm = metadata['Forma rozhodnutia'] || this.extractFromContent(content, 'Forma rozhodnutia:');
+            const title = metadata.Názov || this.extractFromContent(content, 'Názov:') || 'Untitled';
+
+            // Format content efficiently - remove metadata lines
             const formattedContent = content
                 .split('\n')
+                .filter(line => {
+                    const trimmedLine = line.trim();
+                    return trimmedLine &&
+                        !trimmedLine.startsWith('Dátum rozhodnutia:') &&
+                        !trimmedLine.startsWith('ECLI') &&
+                        !trimmedLine.startsWith('Forma rozhodnutia:') &&
+                        !trimmedLine.startsWith('Identifikačné číslo spisu:') &&
+                        !trimmedLine.startsWith('Názov:') &&
+                        !trimmedLine.startsWith('Oblasť právnej úpravy:') &&
+                        !trimmedLine.startsWith('PDF url:') &&
+                        !trimmedLine.startsWith('Podoblasť právnej úpravy:') &&
+                        !trimmedLine.startsWith('Povaha rozhodnutia:') &&
+                        !trimmedLine.startsWith('Pôvodná spisová značka:') &&
+                        !trimmedLine.startsWith('Pôvodný súd:') &&
+                        !trimmedLine.startsWith('Spisová značka:') &&
+                        !trimmedLine.startsWith('Sudca:') &&
+                        !trimmedLine.startsWith('Súd:') &&
+                        !trimmedLine.startsWith('Url:') &&
+                        !trimmedLine.startsWith('Väzby na predpisy') &&
+                        !trimmedLine.startsWith('Chunk Index:') &&
+                        !trimmedLine.startsWith('Type:');
+                })
                 .map(line => line.trim())
-                .filter(line => line.length > 0)
+                .filter(Boolean)
                 .join('\n');
 
-            const formattedDoc = `
-Document: ${metadata.Názov || 'Untitled'}
-Court: ${metadata.Súd || 'N/A'}
-Case Number: ${metadata['Spisová značka'] || 'N/A'}
-Decision Date: ${metadata['Dátum rozhodnutia'] || 'N/A'}
-Judge: ${metadata.Sudca || 'N/A'}
-ECLI: ${metadata['ECLI (Európsky identifikátor judikatúry)'] || 'N/A'}
-Type: ${metadata.type || 'N/A'}
-Chunk Index: ${metadata.chunk_index || 'N/A'}
-Area of Law: ${metadata['Oblasť právnej úpravy'] || 'N/A'}
-Sub-area of Law: ${metadata['Podoblasť právnej úpravy'] || 'N/A'}
-Nature of Decision: ${metadata['Povaha rozhodnutia'] || 'N/A'}
-Decision Form: ${metadata['Forma rozhodnutia'] || 'N/A'}
+            return `Document: ${title}
+Court: ${court}
+Case Number: ${caseNumber}
+Case ID: ${caseId}
+Decision Date: ${decisionDate}
+Judge: ${judge}
+ECLI: ${ecli}
+URL: ${url}
+Type: ${docType}
+Chunk Index: ${chunkIndex}
+Area of Law: ${areaOfLaw}
+Sub-area of Law: ${subAreaOfLaw}
+Nature of Decision: ${natureOfDecision}
+Decision Form: ${decisionForm}
 
 Content:
 ${formattedContent}
 
 Relevance Score: ${result.score.toFixed(4)}
 -------------------`;
-            
-            console.log('Formatted Document:', formattedDoc);
-            return formattedDoc;
         }).join('\n\n');
 
-        console.log('\n✅ ===== FORMATTING COMPLETE =====\n');
-        return formattedResults;
+        return `=== Relevant Court Cases ===
+${summarySection}
+
+=== Detailed Documents ===
+${formattedResults}`;
+    }
+
+    private extractFromContent(content: string, key: string): string {
+        const lines = content.split('\n');
+        for (const line of lines) {
+            if (line.startsWith(key)) {
+                return line.substring(key.length).trim();
+            }
+        }
+        return 'N/A';
     }
 
     private async generateResponseWithContext(
@@ -599,54 +748,55 @@ Relevance Score: ${result.score.toFixed(4)}
         conversationId: string
     ): Promise<string> {
         try {
-            // Check if this is a legal question
-            const isLegal = await this.isLegalQuestion(question, conversationId);
+            const conversationContext = this.getOrCreateContext(conversationId);
+            
+            // Run all checks in parallel
+            const [isLegal, domain, needsRag] = await Promise.all([
+                this.isLegalQuestion(question, conversationId),
+                this.classifyLegalDomain(question, conversationId),
+                this.decideIfRagNeeded(question, conversationId)
+            ]);
+
             if (!isLegal) {
-                return 'Toto nie je právna otázka. Prosím sformulujte otázku týkajúcu sa práva.';
+                return ERROR_MESSAGES.INVALID_QUERY;
             }
 
-            // Classify the legal domain
-            const domain = await this.classifyLegalDomain(question, conversationId);
-            console.log('Klasifikovaná právna doména:', domain);
-
-            // Decide if RAG is needed
-            const needsRag = await this.decideIfRagNeeded(question, conversationId);
             if (!needsRag) {
                 return 'Táto otázka nevyžaduje vyhľadávanie v právnych dokumentoch.';
             }
 
-            // Format history
-            const historyStr = history.map(msg => `${msg.role}: ${msg.content}`).join('\n');
+            console.log('Klasifikovaná právna doména:', domain);
 
-            // Generate the RAG prompt
-            const prompt = `Si právnický asistent špecializovaný na ${domain || 'právo'} (ak je doména uvedená, rešpektuj ju striktne).
-Odpovedaj na otázky výlučne na základe informácií poskytnutých v časti "Znalosti" a ich metadát.
-Nepoužívaj svoju internú znalosť, iba ak nemôžeš nájsť relevantné údaje v "Znalostiach" pre všeobecné otázky.
-Ak použiješ internú znalosť, upozorni, že ide o nepresné údaje mimo zákonov či databázy.
-Cituj konkrétne časti rozsudkov (odseky, paragrafy) alebo zákonov (články, paragrafy) a uveď názov dokumentu (napr. 'Rozsudok 3T/115/2023') a URL z metadát, ak je k dispozícii.
-Ak odpoveď nie je v súlade s uvedenou doménou, upozorni na to a poskytni všeobecnú odpoveď.
+            // Update context with new information
+            this.updateContext(conversationId, {
+                history: [...conversationContext.history, ...history],
+                previousDomain: domain
+            });
 
-Otázka: ${question}
+            // Format history efficiently, including previous context
+            const historyStr = conversationContext.history
+                .slice(-this.MAX_HISTORY_LENGTH)
+                .map(msg => `${msg.role}: ${msg.content}`)
+                .join('\n');
 
-História konverzácie: ${historyStr}
+            // Add previous domain context if relevant
+            const domainContext = conversationContext.previousDomain && 
+                conversationContext.previousDomain !== domain ? 
+                `\nPrevious legal domain: ${conversationContext.previousDomain}` : '';
 
-Znalosti: ${context}
+            // Generate response using the template
+            const prompt = RETRIEVAL_PROMPTS.RAG_RESPONSE
+                .replace('{domain}', domain || 'právo')
+                .replace('{question}', question)
+                .replace('{history}', historyStr)
+                .replace('{context}', context + domainContext);
 
-Prosím poskytnite:
-1. Priamu odpoveď na otázku
-2. Relevantné právne zásady
-3. Aplikovateľné zákony a predpisy
-4. Praktické príklady alebo prípady
-5. Dôležité úvahy alebo varovania`;
-
-            console.log('\nResponse Generation Prompt:');
-            console.log(prompt);
+            // Log only essential information
+            console.log('\n🤖 Sending prompt to OpenAI (length:', prompt.length, 'chars)');
 
             const response = await this.openAIService.generateResponse(prompt, SYSTEM_PROMPTS.LEGAL, conversationId);
 
-            console.log('\n=== Vygenerovaná odpoveď ===');
-            console.log(response);
-            console.log('\n=== Koniec odpovede ===\n');
+            console.log('\n✅ Response received from OpenAI');
 
             return response;
         } catch (error) {
@@ -670,7 +820,7 @@ Prosím poskytnite:
         try {
             console.log('\n📚 ===== STARTING DOCUMENT ADDITION =====');
             console.log(`Number of documents to add: ${documents.length}`);
-            
+
             // Convert documents to LangChain Document format
             const langchainDocs = documents.map(doc => ({
                 pageContent: doc.content,
@@ -697,11 +847,7 @@ Prosím poskytnite:
 
     private async isLegalQuestion(question: string, conversationId: string): Promise<boolean> {
         try {
-            const prompt = `Analyzujte túto otázku a určite, či ide o právnu otázku:
-${question}
-
-Odpovedzte POUZE "áno" alebo "nie".`;
-
+            const prompt = RETRIEVAL_PROMPTS.LEGAL_QUESTION_CHECK.replace('{question}', question);
             const response = await this.openAIService.generateResponse(prompt, SYSTEM_PROMPTS.LEGAL, conversationId);
             return response.trim().toLowerCase() === 'áno';
         } catch (error) {
@@ -712,22 +858,7 @@ Odpovedzte POUZE "áno" alebo "nie".`;
 
     private async classifyLegalDomain(question: string, conversationId: string): Promise<string> {
         try {
-            const prompt = `Klasifikujte túto právnu otázku do jednej z týchto kategórií:
-1. trestné právo
-2. občianske právo
-3. obchodné právo
-4. správne právo
-5. ústavné právo
-6. medzinárodné právo
-7. pracovné právo
-8. rodinné právo
-9. finančné právo
-10. iné
-
-Otázka: ${question}
-
-Odpovedzte POUZE názvom kategórie.`;
-
+            const prompt = RETRIEVAL_PROMPTS.DOMAIN_CLASSIFICATION.replace('{question}', question);
             const domain = await this.openAIService.generateResponse(prompt, SYSTEM_PROMPTS.LEGAL, conversationId);
             return domain.trim().toLowerCase();
         } catch (error) {
@@ -738,11 +869,7 @@ Odpovedzte POUZE názvom kategórie.`;
 
     private async decideIfRagNeeded(question: string, conversationId: string): Promise<boolean> {
         try {
-            const prompt = `Analyzujte túto otázku a určite, či vyžaduje RAG (Retrieval Augmented Generation):
-${question}
-
-Odpovedzte POUZE "áno" alebo "nie".`;
-
+            const prompt = RETRIEVAL_PROMPTS.RAG_NEEDED_CHECK.replace('{question}', question);
             const response = await this.openAIService.generateResponse(prompt, SYSTEM_PROMPTS.LEGAL, conversationId);
             return response.trim().toLowerCase() === 'áno';
         } catch (error) {
@@ -785,15 +912,7 @@ Odpovedzte POUZE "áno" alebo "nie".`;
 
     private async generateConclusion(fullCaseText: string, caseId: string, conversationId: string): Promise<{ content: string; metadata: any } | null> {
         try {
-            const prompt = `Na základe nasledujúceho súdneho rozhodnutia vygenerujte stručné zhrnutie:
-${fullCaseText}
-
-Prosím poskytnite:
-1. Kľúčové body rozhodnutia
-2. Právne zásady
-3. Dôležité precedenty
-4. Praktické dôsledky`;
-
+            const prompt = RETRIEVAL_PROMPTS.CONCLUSION_GENERATION.replace('{case_text}', fullCaseText);
             const conclusion = await this.openAIService.generateResponse(prompt, SYSTEM_PROMPTS.LEGAL, conversationId);
 
             return {

@@ -1,5 +1,3 @@
-import { QdrantClient } from '@qdrant/js-client-rest';
-import { OpenAIEmbeddings } from '@langchain/openai';
 import { config } from 'dotenv';
 import { retrievalService } from '../services/retrievalService';
 
@@ -8,10 +6,10 @@ config();
 async function initializeQdrant() {
     try {
         console.log('🚀 Initializing Qdrant collection...');
-        
+
         // Create collection if it doesn't exist
         await retrievalService.createCollection();
-        
+
         // Sample legal documents
         const sampleDocuments = [
             {
@@ -36,7 +34,7 @@ async function initializeQdrant() {
 
         console.log('📚 Adding sample documents...');
         await retrievalService.addDocuments(sampleDocuments);
-        
+
         console.log('✅ Qdrant initialization complete!');
     } catch (error) {
         console.error('❌ Error initializing Qdrant:', error);
