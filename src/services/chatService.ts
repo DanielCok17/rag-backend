@@ -815,22 +815,8 @@ KĽÚČOVÉ FAKTORY: [Zoznam faktorov, ktoré viedli k klasifikácii]`;
             const context = retrievalService.formatSearchResults(searchResults);
             console.log('Dĺžka kontextu:', context.length);
 
-            const prompt = `Na základe nasledujúceho právneho kontextu a otázky poskytnite detailnú právnu analýzu:
-Kontext: ${context}
-
-Otázka: ${question}
-
-Prosím poskytnite:
-1. Kľúčové právne zásady
-2. Relevantné zákony a predpisy
-3. Analýzu situácie
-4. Potenciálne dôsledky
-5. Súvisiace precedenty alebo prípady`;
-
-            console.log('\nAnalytický prompt:');
-            console.log(prompt);
-
-            const response = await this.openAIService.generateResponse(prompt, SYSTEM_PROMPTS.LEGAL, conversationId);
+            // Use retrievalService's generateResponseWithContext instead of direct prompt generation
+            const response = await retrievalService.generateResponseWithContext(question, context, history, conversationId);
             
             console.log('\n=== Vygenerovaná právna analýza ===');
             console.log(response);
