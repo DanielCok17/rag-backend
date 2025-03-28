@@ -10,6 +10,7 @@ import OpenAIService from './openaiService';
 import QdrantClientSingleton from '../db/qdrantClient';
 import { loggerService } from './loggerService';
 import { QdrantRecord, TranslatedQdrantRecord } from '../types/qdrant';
+import { traceable } from '../utils/langsmith';
 
 const EMBEDDING_MODEL = "text-embedding-3-large";
 const MAX_CHARS = 10000;
@@ -117,15 +118,16 @@ class RetrievalService {
      * @param conversationId - The conversation ID associated with the request.
      * @returns The document content as a string.
      */
-    async getSpecificDocument(query: string, conversationId: string): Promise<string> {
-        try {
-            const searchResults = await this.searchRelevantDocuments(query, conversationId);
-            if (!searchResults.length) {
-                throw new Error(ERROR_MESSAGES.NO_RELEVANT_DOCS);
-            }
+    public async getSpecificDocument(query: string, conversationId: string): Promise<string> {
+        return traceable(async () => {
+            try {
+                const searchResults = await this.searchRelevantDocuments(query, conversationId);
+                if (!searchResults.length) {
+                    throw new Error(ERROR_MESSAGES.NO_RELEVANT_DOCS);
+                }
 
-            const context = this.formatSearchResults(searchResults);
-            const prompt = `Na základe nasledujúcich súdnych rozhodnutí o neoprávnenom držaní omamných a psychotropných látok poskytnite jasný prehľad v právnickom jazyku. Zamerajte sa na tresty a právne dôsledky.
+                const context = this.formatSearchResults(searchResults);
+                const prompt = `Na základe nasledujúcich súdnych rozhodnutí o neoprávnenom držaní omamných a psychotropných látok poskytnite jasný prehľad v právnickom jazyku. Zamerajte sa na tresty a právne dôsledky.
 
 Retrieved documents:
 
@@ -139,17 +141,18 @@ Prosím poskytnite prehľad zameraný na:
 
 Prosím vysvetlite v právnickom jazyku.`;
 
-            console.log('\n🤖 Generujem Slovak legal summary...');
-            const summary = await this.openAIService.generateResponse(prompt, SYSTEM_PROMPTS.LEGAL, conversationId);
-            console.log('\n📝 Vygenerované zhrnutie:');
-            console.log(summary);
-            console.log('\n✅ Zhrnutie vygenerované\n');
+                console.log('\n🤖 Generujem Slovak legal summary...');
+                const summary = await this.openAIService.generateResponse(prompt, SYSTEM_PROMPTS.LEGAL, conversationId);
+                console.log('\n📝 Vygenerované zhrnutie:');
+                console.log(summary);
+                console.log('\n✅ Zhrnutie vygenerované\n');
 
-            return summary;
-        } catch (error) {
-            console.error('Chyba pri získavaní konkrétneho dokumentu:', error);
-            throw error;
-        }
+                return summary;
+            } catch (error) {
+                console.error('Chyba pri získavaní konkrétneho dokumentu:', error);
+                throw error;
+            }
+        }, 'getSpecificDocument')();
     }
 
     /**
@@ -393,91 +396,78 @@ Prosím zahrňte:
     }
 
     private async safeSimilaritySearch(query: string, k: number = 5, filter?: any): Promise<Document[]> {
-        try {
-            console.log(`\n🔍 Performing similarity search with query: ${query.substring(0, 200)}...`);
-            console.log('Filter:', JSON.stringify(filter, null, 2));
+        return traceable(async () => {
+            try {
+                console.log(`\n🔍 Performing similarity search with query: ${query.substring(0, 200)}...`);
+                console.log('Filter:', JSON.stringify(filter, null, 2));
 
-            // Get raw results from Qdrant client
-            const client = this.vectorStore.client;
-            const searchResults = await client.search(this.COLLECTION_NAME, {
-                vector: await this.embeddings.embedQuery(query),
-                limit: k,
-                filter: filter,
-                with_payload: true
-            });
+                // Get raw results from Qdrant client
+                const client = this.vectorStore.client;
+                const searchResults = await client.search(this.COLLECTION_NAME, {
+                    vector: await this.embeddings.embedQuery(query),
+                    limit: k,
+                    filter: filter,
+                    with_payload: true
+                });
 
-            console.log(`✅ Successfully retrieved ${searchResults.length} documents`);
+                console.log(`✅ Successfully retrieved ${searchResults.length} documents`);
 
-            // Log the raw payload structure for debugging
-            // searchResults.forEach((result, index) => {
-            //     console.log(`\n📄 Document ${index + 1} Raw Payload:`, {
-            //         score: result.score,
-            //         payload: result.payload,
-            //         payloadKeys: Object.keys(result.payload || {})
-            //     });
-            // });
+                // Convert Qdrant results to LangChain documents
+                const documents = searchResults.map(result => {
+                    const payload = result.payload as Record<string, any>;
+                    let content = '';
+                    let metadata = { ...payload };
 
-            // Convert Qdrant results to LangChain documents
-            const documents = searchResults.map(result => {
-                const payload = result.payload as Record<string, any>;
-                let content = '';
-                let metadata = { ...payload };
-
-                // First try to get the actual content from the payload
-                if (payload?.obsah) {
-                    content = payload.obsah;
-                    delete metadata.obsah;
-                }
-                // Then try the standard LangChain format
-                else if (payload?.pageContent) {
-                    content = payload.pageContent;
-                    delete metadata.pageContent;
-                }
-                // Then try the raw text field
-                else if (payload?.text) {
-                    content = payload.text;
-                    delete metadata.text;
-                }
-                // Finally, try to get any text content from the payload
-                else if (payload) {
-                    // Try to find any string value in the payload that's not metadata
-                    for (const [key, value] of Object.entries(payload)) {
-                        if (typeof value === 'string' &&
-                            value.length > 0 &&
-                            !key.toLowerCase().includes('datum') &&
-                            !key.toLowerCase().includes('url') &&
-                            !key.toLowerCase().includes('ecli') &&
-                            !key.toLowerCase().includes('spis') &&
-                            !key.toLowerCase().includes('sud') &&
-                            !key.toLowerCase().includes('type') &&
-                            !key.toLowerCase().includes('chunk')) {
-                            content = value;
-                            delete metadata[key];
-                            break;
+                    // First try to get the actual content from the payload
+                    if (payload?.obsah) {
+                        content = payload.obsah;
+                        delete metadata.obsah;
+                    }
+                    // Then try the standard LangChain format
+                    else if (payload?.pageContent) {
+                        content = payload.pageContent;
+                        delete metadata.pageContent;
+                    }
+                    // Then try the raw text field
+                    else if (payload?.text) {
+                        content = payload.text;
+                        delete metadata.text;
+                    }
+                    // Finally, try to get any text content from the payload
+                    else if (payload) {
+                        // Try to find any string value in the payload that's not metadata
+                        for (const [key, value] of Object.entries(payload)) {
+                            if (typeof value === 'string' &&
+                                value.length > 0 &&
+                                !key.toLowerCase().includes('datum') &&
+                                !key.toLowerCase().includes('url') &&
+                                !key.toLowerCase().includes('ecli') &&
+                                !key.toLowerCase().includes('spis') &&
+                                !key.toLowerCase().includes('sud') &&
+                                !key.toLowerCase().includes('type') &&
+                                !key.toLowerCase().includes('chunk')) {
+                                content = value;
+                                delete metadata[key];
+                                break;
+                            }
                         }
                     }
-                }
 
-                if (!content) {
-                    console.log('No content found in payload, using default');
-                    content = 'No content available';
-                }
-
-                console.log('Final content length:', content.length);
-                console.log('Content preview:', content.substring(0, 200) + '...');
-
-                // Create a new document with the correct content and metadata
-                return new Document({
-                    pageContent: content,
-                    metadata: metadata
+                    return new Document({
+                        pageContent: content,
+                        metadata: {
+                            ...metadata,
+                            score: result.score
+                        }
+                    });
                 });
-            });
 
-            return documents;
-        } catch (error) {
-            console.error('❌ Error in similarity search:', error);
-            throw error;
-        }
+                return documents;
+            } catch (error) {
+                console.error('Error in safeSimilaritySearch:', error);
+                throw error;
+            }
+        }, 'safeSimilaritySearch')();
     }
 
     private async safeRetrieverInvoke(query: string): Promise<Document[]> {
@@ -885,52 +875,53 @@ ${contentChunks.map(c => c.pageContent).join('\n\n')}\n`;
         history: ChatMessage[],
         conversationId: string
     ): Promise<string> {
-        const startTime = Date.now();
-        try {
-            loggerService.logWorkflowStep('Starting Response Generation', {
-                conversationId,
-                questionLength: question.length,
-                contextLength: context.length
-            });
-
-            // Extract case information from context
-            const caseMatches = context.match(/=== Rozsudok (.*?) ===\nSúd: (.*?)\nDátum: (.*?)\nSudca: (.*?)\nURL: (.*?)\n\nZhrnutie:\n(.*?)\n/g);
-            
-            // Build search results header with case information
-            let searchResultsHeader = 'Na základe vyhľadávania v nasledujúcich rozsudkoch:\n\n';
-            
-            if (caseMatches) {
-                caseMatches.forEach(match => {
-                    const [_, caseNumber, court, date, judge, url, summary] = match.match(/=== Rozsudok (.*?) ===\nSúd: (.*?)\nDátum: (.*?)\nSudca: (.*?)\nURL: (.*?)\n\nZhrnutie:\n(.*?)\n/) || [];
-                    if (caseNumber && date && url) {
-                        searchResultsHeader += `• Rozsudok ${caseNumber} (${date})\n`;
-                        searchResultsHeader += `  ${url}\n`;
-                        searchResultsHeader += `  Zhrnutie: ${summary.trim().substring(0, 200)}...\n\n`;
-                    }
+        return traceable(async () => {
+            const startTime = Date.now();
+            try {
+                loggerService.logWorkflowStep('Starting Response Generation', {
+                    conversationId,
+                    questionLength: question.length,
+                    contextLength: context.length
                 });
-            }
 
-            // Format conversation history for context
-            const conversationContext = history.length > 1 ? 
-                `\n=== Kontext z predchádzajúcich otázok ===\n` +
-                history.slice(0, -1).map((msg, index) => 
-                    `${index + 1}. Otázka: ${msg.content}`
-                ).join('\n') + '\n' : '';
+                // Extract case information from context
+                const caseMatches = context.match(/=== Rozsudok (.*?) ===\nSúd: (.*?)\nDátum: (.*?)\nSudca: (.*?)\nURL: (.*?)\n\nZhrnutie:\n(.*?)\n/g);
+                
+                // Build search results header with case information
+                let searchResultsHeader = 'Na základe vyhľadávania v nasledujúcich rozsudkoch:\n\n';
+                
+                if (caseMatches) {
+                    caseMatches.forEach(match => {
+                        const [_, caseNumber, court, date, judge, url, summary] = match.match(/=== Rozsudok (.*?) ===\nSúd: (.*?)\nDátum: (.*?)\nSudca: (.*?)\nURL: (.*?)\n\nZhrnutie:\n(.*?)\n/) || [];
+                        if (caseNumber && date && url) {
+                            searchResultsHeader += `• Rozsudok ${caseNumber} (${date})\n`;
+                            searchResultsHeader += `  ${url}\n`;
+                            searchResultsHeader += `  Zhrnutie: ${summary.trim().substring(0, 200)}...\n\n`;
+                        }
+                    });
+                }
 
-            // Extract metadata from context
-            const metadata = caseMatches ? caseMatches.map(match => {
-                const [_, caseNumber, court, date, judge, url] = match.match(/=== Rozsudok (.*?) ===\nSúd: (.*?)\nDátum: (.*?)\nSudca: (.*?)\nURL: (.*?)\n/) || [];
-                return {
-                    caseNumber,
-                    court,
-                    date,
-                    judge,
-                    url
-                };
-            }) : [];
+                // Format conversation history for context
+                const conversationContext = history.length > 1 ? 
+                    `\n=== Kontext z predchádzajúcich otázok ===\n` +
+                    history.slice(0, -1).map((msg, index) => 
+                        `${index + 1}. Otázka: ${msg.content}`
+                    ).join('\n') + '\n' : '';
 
-            // Build the complete prompt with all required components
-            const prompt = `Si právnický asistent špecializovaný na právo.
+                // Extract metadata from context
+                const metadata = caseMatches ? caseMatches.map(match => {
+                    const [_, caseNumber, court, date, judge, url] = match.match(/=== Rozsudok (.*?) ===\nSúd: (.*?)\nDátum: (.*?)\nSudca: (.*?)\nURL: (.*?)\n/) || [];
+                    return {
+                        caseNumber,
+                        court,
+                        date,
+                        judge,
+                        url
+                    };
+                }) : [];
+
+                // Build the complete prompt with all required components
+                const prompt = `Si právnický asistent špecializovaný na právo.
 Odpovedaj na otázky výlučne na základe informácií poskytnutých v časti "Znalosti" a ich metadát.
 Nepoužívaj svoju internú znalosť, iba ak nemôžeš nájsť relevantné údaje v "Znalostiach" pre všeobecné otázky.
 Ak použiješ internú znalosť, upozorni, že ide o nepresné údaje mimo zákonov či databázy.
@@ -956,38 +947,39 @@ Pri odpovedi sa zamerajte na:
 
 Prosím používajte presné citácie zo Zhrnutí a podporné detaily z obsahu dokumentov.`;
 
-            // Log the final prompt with clear formatting
-            console.log('\n\n');
-            console.log('='.repeat(80));
-            console.log('FINAL PROMPT FOR OPENAI');
-            console.log('='.repeat(80));
-            console.log('\nSYSTEM PROMPT:');
-            console.log(SYSTEM_PROMPTS.LEGAL);
-            console.log('\nUSER PROMPT:');
-            console.log(prompt);
-            console.log('='.repeat(80));
-            console.log('\n');
+                // Log the final prompt with clear formatting
+                console.log('\n\n');
+                console.log('='.repeat(80));
+                console.log('FINAL PROMPT FOR OPENAI');
+                console.log('='.repeat(80));
+                console.log('\nSYSTEM PROMPT:');
+                console.log(SYSTEM_PROMPTS.LEGAL);
+                console.log('\nUSER PROMPT:');
+                console.log(prompt);
+                console.log('='.repeat(80));
+                console.log('\n');
 
-            // Log token estimate
-            const promptTokens = prompt.length / 4;
-            loggerService.debug('Prompt Token Estimate', {
-                promptTokens,
-                promptLength: prompt.length
-            });
+                // Log token estimate
+                const promptTokens = prompt.length / 4;
+                loggerService.debug('Prompt Token Estimate', {
+                    promptTokens,
+                    promptLength: prompt.length
+                });
 
-            const response = await this.openAIService.generateResponse(prompt, SYSTEM_PROMPTS.LEGAL, conversationId);
+                const response = await this.openAIService.generateResponse(prompt, SYSTEM_PROMPTS.LEGAL, conversationId);
 
-            loggerService.logWorkflowStep('Response Generation Complete', {
-                conversationId,
-                totalDuration: Date.now() - startTime,
-                responseLength: response.length
-            });
+                loggerService.logWorkflowStep('Response Generation Complete', {
+                    conversationId,
+                    totalDuration: Date.now() - startTime,
+                    responseLength: response.length
+                });
 
-            return response;
-        } catch (error) {
-            loggerService.logError(error as Error, 'Response Generation');
-            throw error;
-        }
+                return response;
+            } catch (error) {
+                loggerService.logError(error as Error, 'Response Generation');
+                throw error;
+            }
+        }, 'generateResponseWithContext')();
     }
 
     public async createCollection(): Promise<void> {
@@ -1002,28 +994,30 @@ Prosím používajte presné citácie zo Zhrnutí a podporné detaily z obsahu d
     }
 
     public async addDocuments(documents: Array<{ content: string; metadata: any }>): Promise<void> {
-        try {
-            console.log('\n📚 ===== STARTING DOCUMENT ADDITION =====');
-            console.log(`Number of documents to add: ${documents.length}`);
+        return traceable(async () => {
+            try {
+                console.log('\n📚 ===== STARTING DOCUMENT ADDITION =====');
+                console.log(`Number of documents to add: ${documents.length}`);
 
-            // Convert documents to LangChain Document format
-            const langchainDocs = documents.map(doc => ({
-                pageContent: doc.content,
-                metadata: doc.metadata
-            }));
+                // Convert documents to LangChain Document format
+                const langchainDocs = documents.map(doc => ({
+                    pageContent: doc.content,
+                    metadata: doc.metadata
+                }));
 
-            // Add documents using LangChain's QdrantVectorStore
-            await this.vectorStore.addDocuments(langchainDocs);
+                // Add documents using LangChain's QdrantVectorStore
+                await this.vectorStore.addDocuments(langchainDocs);
 
-            // Get total count using the client directly
-            const client = this.vectorStore.client;
-            const count = await client.count(this.COLLECTION_NAME);
-            console.log(`\n📊 Total documents in collection: ${count.count}`);
-            console.log('✅ ===== DOCUMENT ADDITION COMPLETE =====\n');
-        } catch (error) {
-            console.error('❌ Error adding documents:', error);
-            throw error;
-        }
+                // Get total count using the client directly
+                const client = this.vectorStore.client;
+                const count = await client.count(this.COLLECTION_NAME);
+                console.log(`\n📊 Total documents in collection: ${count.count}`);
+                console.log('✅ ===== DOCUMENT ADDITION COMPLETE =====\n');
+            } catch (error) {
+                console.error('❌ Error adding documents:', error);
+                throw error;
+            }
+        }, 'addDocuments')();
     }
 
     private stripAccents(text: string): string {
@@ -1252,17 +1246,19 @@ Prosím používajte presné citácie zo Zhrnutí a podporné detaily z obsahu d
      * Helper method to get vector interpretation using OpenAI
      */
     private async getVectorInterpretation(vector: number[]): Promise<string> {
-        try {
-            const embeddingResponse = await this.openAIService.generateResponse(
-                `Please analyze these vector components and explain what legal concept or text they might represent: ${vector.slice(0, 10).join(', ')}...`,
-                'You are a helpful assistant that understands vector embeddings and can explain what they might represent in legal text.',
-                'vector_interpretation'
-            );
-            return embeddingResponse;
-        } catch (error) {
-            loggerService.warn('Failed to decode vector', { error });
-            return 'Vector interpretation not available';
-        }
+        return traceable(async () => {
+            try {
+                const embeddingResponse = await this.openAIService.generateResponse(
+                    `Please analyze these vector components and explain what legal concept or text they might represent: ${vector.slice(0, 10).join(', ')}...`,
+                    'You are a helpful assistant that understands vector embeddings and can explain what they might represent in legal text.',
+                    'vector_interpretation'
+                );
+                return embeddingResponse;
+            } catch (error) {
+                loggerService.warn('Failed to decode vector', { error });
+                return 'Vector interpretation not available';
+            }
+        }, 'getVectorInterpretation')();
     }
 }
 

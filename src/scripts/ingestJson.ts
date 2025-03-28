@@ -6,6 +6,7 @@ import { config } from 'dotenv';
 import OpenAI from 'openai';
 import { RecursiveCharacterTextSplitter } from 'langchain/text_splitter';
 import { v4 as uuidv4 } from 'uuid';
+import { traceable } from '../utils/langsmith';
 
 config();
 
@@ -29,27 +30,31 @@ interface CourtJudgment {
 }
 
 async function generateEmbeddings(text: string): Promise<number[]> {
-    const openai = new OpenAI({
-        apiKey: process.env.OPENAI_API_KEY
-    });
+    return traceable(async () => {
+        const openai = new OpenAI({
+            apiKey: process.env.OPENAI_API_KEY
+        });
 
-    const response = await openai.embeddings.create({
-        model: "text-embedding-3-large",
-        input: text
-    });
+        const response = await openai.embeddings.create({
+            model: "text-embedding-3-large",
+            input: text
+        });
 
-    return response.data[0].embedding;
+        return response.data[0].embedding;
+    }, 'generateEmbeddings')();
 }
 
 async function chunkText(text: string, chunkSize: number = 4000, overlap: number = 200): Promise<string[]> {
-    const splitter = new RecursiveCharacterTextSplitter({
-        chunkSize,
-        chunkOverlap: overlap,
-        separators: ["\n\n", "\n", " ", ""],
-        lengthFunction: (text) => text.length,
-    });
+    return traceable(async () => {
+        const splitter = new RecursiveCharacterTextSplitter({
+            chunkSize,
+            chunkOverlap: overlap,
+            separators: ["\n\n", "\n", " ", ""],
+            lengthFunction: (text) => text.length,
+        });
 
-    return await splitter.splitText(text);
+        return await splitter.splitText(text);
+    }, 'chunkText')();
 }
 
 async function checkDuplicate(client: any, collectionName: string, caseId: string): Promise<boolean> {

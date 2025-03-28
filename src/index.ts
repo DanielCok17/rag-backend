@@ -9,6 +9,7 @@ import cors from 'cors';
 import QdrantClientSingleton from './db/qdrantClient';
 import SocketService from './services/socketService';
 import routes from './routes';
+import { openAIClient } from './utils/langsmith';
 
 class Application {
     private port: number;
@@ -33,6 +34,24 @@ class Application {
             // Initialize Qdrant collection
             await QdrantClientSingleton.waitForCollection();
 
+            // Initialize LangSmith
+            if (process.env.LANGSMITH_TRACING === 'true') {
+                console.log('LangSmith tracing enabled');
+                // Test LangSmith connection by making a simple API call
+                try {
+                    await openAIClient.chat.completions.create({
+                        model: "gpt-4o-mini",
+                        messages: [{ role: "user", content: "test" }],
+                        max_tokens: 5
+                    });
+                    console.log('LangSmith connection successful');
+                } catch (error) {
+                    console.error('LangSmith connection failed:', error);
+                }
+            } else {
+                console.log('LangSmith tracing disabled');
+            }
+
             // Setup middleware
             this.setupMiddleware();
 
@@ -53,7 +72,7 @@ class Application {
     private setupMiddleware(): void {
         // Enable CORS
         this.app.use(cors());
-        
+
         // Parse JSON bodies
         this.app.use(express.json());
 
@@ -72,7 +91,7 @@ class Application {
     private setupRoutes(): void {
         // Mount all routes under /api
         this.app.use('/api', routes);
-        
+
         // Handle 404
         this.app.use((req, res) => {
             res.status(404).json({ error: 'Not Found' });

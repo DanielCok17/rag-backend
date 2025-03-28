@@ -4,6 +4,8 @@ import { ChatMessage, Conversation } from '../types/chat';
 import OpenAIService from './openaiService';
 import { monitoringService } from './monitoringService';
 import { SYSTEM_PROMPTS, RETRIEVAL_PROMPTS } from '../config/prompts';
+import { loggerService } from './loggerService';
+import { traceable } from '../utils/langsmith';
 
 interface ConversationState {
     currentCase?: {
@@ -62,7 +64,7 @@ class ChatService {
     private readonly MAX_TOTAL_TOKENS = 8000;
     private readonly STATE_EXPIRY_MS = 30 * 60 * 1000; // 30 minutes
     private readonly OPENAI_CONTEXT_EXPIRY_MS = 5 * 60 * 1000; // 5 minutes
-    private readonly MAX_SUMMARY_TOKENS = 1000;
+    private readonly MAX_SUMMARY_TOKENS = 500;
     private readonly MAX_KEY_POINTS = 5;
     private readonly retryConfig: RetryConfig = {
         maxRetries: 3,
@@ -225,12 +227,13 @@ class ChatService {
     }
 
     private async updateConversationSummary(state: ConversationState, recentHistory: ChatMessage[]): Promise<void> {
-        try {
-            console.log('\n📝 ===== Updating Conversation Summary =====');
-            console.log('Recent history length:', recentHistory.length);
+        return traceable(async () => {
+            try {
+                console.log('\n📝 ===== Updating Conversation Summary =====');
+                console.log('Recent history length:', recentHistory.length);
 
-            // First, analyze the conversation to identify key themes and topics
-            const analysisPrompt = `Analyze this legal conversation and identify key themes and topics:
+                // First, analyze the conversation to identify key themes and topics
+                const analysisPrompt = `Analyze this legal conversation and identify key themes and topics:
 
 ${recentHistory.map(msg => `${msg.role}: ${msg.content}`).join('\n')}
 
@@ -243,22 +246,22 @@ Provide a structured analysis in JSON format:
     "conversationFlow": string
 }`;
 
-            const analysisResponse = await this.openAIService.generateResponse(
-                analysisPrompt,
-                SYSTEM_PROMPTS.LEGAL,
-                state.openAIContext.summary || ''
-            );
+                const analysisResponse = await this.openAIService.generateResponse(
+                    analysisPrompt,
+                    SYSTEM_PROMPTS.LEGAL,
+                    state.openAIContext.summary || ''
+                );
 
-            const analysis = JSON.parse(analysisResponse);
-            console.log('\n📊 Conversation Analysis:');
-            console.log('Main Topics:', analysis.mainTopics);
-            console.log('Key Legal Concepts:', analysis.keyLegalConcepts);
-            console.log('Important Decisions:', analysis.importantDecisions);
-            console.log('Relevant Laws:', analysis.relevantLaws);
-            console.log('Conversation Flow:', analysis.conversationFlow);
+                const analysis = JSON.parse(analysisResponse);
+                console.log('\n📊 Conversation Analysis:');
+                console.log('Main Topics:', analysis.mainTopics);
+                console.log('Key Legal Concepts:', analysis.keyLegalConcepts);
+                console.log('Important Decisions:', analysis.importantDecisions);
+                console.log('Relevant Laws:', analysis.relevantLaws);
+                console.log('Conversation Flow:', analysis.conversationFlow);
 
-            // Generate a concise summary focusing on key points
-            const summaryPrompt = `Based on this legal conversation analysis, create a concise summary:
+                // Generate a concise summary focusing on key points
+                const summaryPrompt = `Based on this legal conversation analysis, create a concise summary:
 
 Main Topics: ${analysis.mainTopics.join(', ')}
 Key Legal Concepts: ${analysis.keyLegalConcepts.join(', ')}
@@ -285,75 +288,46 @@ KEY_POINTS:
 2. [Second key point]
 ...`;
 
-            const summaryResponse = await this.openAIService.generateResponse(
-                summaryPrompt,
-                SYSTEM_PROMPTS.LEGAL,
-                state.openAIContext.summary || ''
-            );
-
-            // Parse the response to separate summary and key points
-            const [summary, ...keyPoints] = summaryResponse
-                .split('\n')
-                .filter(line => line.trim())
-                .map(line => line.replace(/^(SUMMARY:|KEY_POINTS:|[0-9]+\.\s*)/, '').trim());
-
-            // Update the state with new summary and key points
-            state.openAIContext.summary = summary;
-            state.openAIContext.keyPoints = keyPoints.slice(0, this.MAX_KEY_POINTS);
-
-            // Log the updated summary
-            console.log('\n📝 Updated Summary:');
-            console.log('Summary:', summary);
-            console.log('\nKey Points:');
-            state.openAIContext.keyPoints.forEach((point, index) => {
-                console.log(`${index + 1}. ${point}`);
-            });
-            console.log('\n=====================================\n');
-
-            // Store the analysis for future reference
-            state.openAIContext.lastAnalysis = {
-                mainTopics: analysis.mainTopics,
-                keyLegalConcepts: analysis.keyLegalConcepts,
-                importantDecisions: analysis.importantDecisions,
-                relevantLaws: analysis.relevantLaws,
-                conversationFlow: analysis.conversationFlow,
-                timestamp: Date.now()
-            };
-
-        } catch (error) {
-            console.error('Error updating conversation summary:', error);
-            // Fallback to a simpler summary if analysis fails
-            try {
-                const fallbackPrompt = `Summarize this legal conversation briefly:
-
-${recentHistory.map(msg => `${msg.role}: ${msg.content}`).join('\n')}
-
-Provide:
-1. A brief summary of the main points
-2. ${this.MAX_KEY_POINTS} key takeaways`;
-
-                const fallbackResponse = await this.openAIService.generateResponse(
-                    fallbackPrompt,
+                const summaryResponse = await this.openAIService.generateResponse(
+                    summaryPrompt,
                     SYSTEM_PROMPTS.LEGAL,
                     state.openAIContext.summary || ''
                 );
 
-                const [summary, ...keyPoints] = fallbackResponse
+                // Parse the response to separate summary and key points
+                const [summary, ...keyPoints] = summaryResponse
                     .split('\n')
                     .filter(line => line.trim())
-                    .map(line => line.replace(/^[0-9]+\.\s*/, '').trim());
+                    .map(line => line.replace(/^(SUMMARY:|KEY_POINTS:|[0-9]+\.\s*)/, '').trim());
 
+                // Update the state with new summary and key points
                 state.openAIContext.summary = summary;
                 state.openAIContext.keyPoints = keyPoints.slice(0, this.MAX_KEY_POINTS);
 
-                console.log('\n📝 Fallback Summary:');
+                // Log the updated summary
+                console.log('\n📝 Updated Summary:');
                 console.log('Summary:', summary);
-                console.log('Key Points:', keyPoints);
-                console.log('=====================================\n');
-            } catch (fallbackError) {
-                console.error('Error generating fallback summary:', fallbackError);
+                console.log('\nKey Points:');
+                keyPoints.slice(0, this.MAX_KEY_POINTS).forEach((point, index) => {
+                    console.log(`${index + 1}. ${point}`);
+                });
+                console.log('\n=====================================\n');
+
+                // Store the analysis for future reference
+                state.openAIContext.lastAnalysis = {
+                    mainTopics: analysis.mainTopics,
+                    keyLegalConcepts: analysis.keyLegalConcepts,
+                    importantDecisions: analysis.importantDecisions,
+                    relevantLaws: analysis.relevantLaws,
+                    conversationFlow: analysis.conversationFlow,
+                    timestamp: Date.now()
+                };
+
+            } catch (error) {
+                console.error('Error updating conversation summary:', error);
+                throw error;
             }
-        }
+        }, 'updateConversationSummary')();
     }
 
     private estimateTokenCount(messages: ChatMessage[]): number {
@@ -943,8 +917,10 @@ Prosím poskytnite vhodnú odpoveď na základe typu príkazu.`;
      * Placeholder for calling the Language Model (e.g., LangChain LLM).
      */
     private async callLLM(prompt: string): Promise<string> {
-        // TODO: Implement LangChain LLM call
-        return 'Mock response';
+        return traceable(async () => {
+            // TODO: Implement LangChain LLM call
+            return 'Mock response';
+        }, 'callLLM')();
     }
 
     /**
