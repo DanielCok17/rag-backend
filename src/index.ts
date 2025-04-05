@@ -35,7 +35,7 @@ class Application {
             await QdrantClientSingleton.waitForCollection();
 
             // Initialize LangSmith
-            if (process.env.LANGSMITH_TRACING === 'true') {
+            if (process.env.ENABLE_LANGSMITH_TRACING === 'true') {
                 console.log('LangSmith tracing enabled');
                 // Test LangSmith connection by making a simple API call
                 try {

@@ -1,9 +1,20 @@
-import { Request, Response } from 'express';
+import { RequestHandler } from 'express';
 import { QdrantClientSingleton } from '../db/qdrantClient';
+import { loggerService } from '../services/loggerService';
 
-export const testQdrantConnection = async (req: Request, res: Response) => {
+export const testQdrantConnection: RequestHandler = async (req, res) => {
     try {
         const client = QdrantClientSingleton.getInstance();
+        if (!client) {
+            loggerService.error('Qdrant client not initialized');
+            res.status(503).json({
+                status: 'error',
+                message: 'Qdrant service not available',
+                error: 'Qdrant client not initialized'
+            });
+            return;
+        }
+
         const collectionName = QdrantClientSingleton.getCollectionName();
 
         // Test collection info
@@ -33,7 +44,9 @@ export const testQdrantConnection = async (req: Request, res: Response) => {
             }
         });
     } catch (error) {
-        console.error('Error testing Qdrant connection:', error);
+        loggerService.error('Error testing Qdrant connection', {
+            error: error instanceof Error ? error.message : 'Unknown error'
+        });
         res.status(500).json({
             status: 'error',
             message: 'Failed to test Qdrant connection',

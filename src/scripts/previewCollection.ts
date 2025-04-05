@@ -19,6 +19,7 @@ const COLLECTION_NAME = process.env.QDRANT_COLLECTION || '500_chunk_size_10_over
 async function previewCollectionJson(): Promise<Point[]> {
     const qdrantClient = new QdrantClient({
         url: `http://${process.env.QDRANT_HOST || 'localhost'}:${process.env.QDRANT_PORT || '6333'}`,
+        apiKey: process.env.QDRANT_API_KEY || ''
     });
 
     try {

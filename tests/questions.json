@@ -1,0 +1,37 @@
+
+{
+    "otázky": [
+      {
+        "otázka": "Je možné zastaviť konanie, ak žalobca pred rozhodnutím súdu zoberie žalobu späť?",
+        "odpoveď": "Áno, je možné zastaviť konanie, ak žalobca pred rozhodnutím súdu zoberie žalobu späť. Podľa § 40 ods. 2 Správneho poriadku, ak žalobca do vydania rozhodnutia vezme žalobu späť, súd konanie zastaví. V tomto prípade by súd prijal rozhodnutie na základe späťvzatia žaloby a konanie by bolo ukončené bez meritórneho rozhodnutia o veci.",
+        "relevantný_rozsudok": "Rozsudok 15Sas/10/2023, Správny súd v Banskej Bystrici",
+        "url": "https://www.slov-lex.sk/sudne-rozhodnutia/vseobecne-sudy-sr/e7a6e2f3-ce97-42ff-9588-600ada009aaf:b54f2bd7-1f89-47fd-ad59-28724ce17c8e"
+      },
+      {
+        "otazka": "Za akých podmienok je podľa § 70 a § 71 Zákona č. 461/2003 Z. z. možné zamietnuť žiadosť o invalidný dôchodok, keď miera poklesu schopnosti vykonávať zárobkovú činnosť nepresiahne 40 %?",
+        "odpoved": "Rozhodujúcim kritériom je posúdenie dlhodobo nepriaznivého zdravotného stavu posudkovým lekárom. Ak posudok stanoví mieru poklesu schopnosti vykonávať zárobkovú činnosť pod 40 %, zákonné podmienky na priznanie invalidného dôchodku nie sú splnené, a preto sa žiadosť zamieta.",
+        "rozhodnutie": "Rozsudok 16Sas/10/2023",
+        "url": "https://www.slov-lex.sk/sudne-rozhodnutia/vseobecne-sudy-sr/06f8a64f-6151-427e-9d3c-eb0a434bf6a8:86983141-bbab-46fc-84c3-bb9dcb186695"
+      },
+      {
+        "otazka": "Z akého dôvodu súd podľa § 191 ods. 1 písm. c) zákona č. 162/2015 Z. z. zrušil rozhodnutie generálneho riaditeľa Sociálnej poisťovne vo veci zamietnutia starobného dôchodku?",
+        "odpoved": "Súd konštatoval, že správny orgán nezohľadnil všetky roky započítanej služby a podmienky vyplývajúce zo zákona č. 328/2002 Z. z., čím došlo k nesprávnemu právnemu posúdeniu. Rozhodnutie bolo z toho dôvodu zrušené a vrátené na ďalšie konanie.",
+        "rozhodnutie": "Rozsudok 13Sas/9/2024",
+        "url": "https://www.slov-lex.sk/sudne-rozhodnutia/vseobecne-sudy-sr/aeb1f936-e6dc-431a-87ea-c55318e0b8e3:797804dd-69f8-4bb0-a56a-cda5a468ea73"
+      },
+      {
+        "otazka": "Prečo je podľa § 88a zákona č. 404/2011 Z. z. o pobyte cudzincov možné zaistiť cudzinca, ktorý na území Slovenskej republiky požiada o azyl opakovane?",
+        "odpoved": "Správny súd uviedol, že v prípade opakovanej žiadosti o azyl, ktorú žiadateľ predkladá s cieľom vyhnúť sa výkonu predchádzajúceho rozhodnutia o administratívnom vyhostení, môže byť cudzinec zaistený z dôvodu rizika úteku a potreby zistiť všetky podstatné okolnosti opakovanej žiadosti.",
+        "rozhodnutie": "Rozhodnutie 7Saz/1/2025",
+        "url": "https://www.slov-lex.sk/sudne-rozhodnutia/vseobecne-sudy-sr/a7206a91-d087-4f3e-b58d-dafc08ddeeb2:4a84590b-69ac-4103-8e36-23c2062b39e9"
+      },
+      {
+        "otazka": "Aké sú dôvody pre zastavenie konania v správnom súdnictve?",
+        "odpoved": "Podľa § 49 ods. 1 Správneho súdneho poriadku je potrebné, aby žalobca pri podaní žaloby (a počas celého konania) bol zastúpený advokátom, ak sám (alebo jeho zamestnanec či člen, ktorý za neho koná) nemá vysokoškolské právnické vzdelanie druhého stupňa. Táto povinnosť sa vzťahuje aj na samotné spísanie žaloby. Zákon ale pozná aj výnimky (napr. niektoré sociálne veci, správne žaloby o azyl a pod.), pri ktorých sa zastúpenie advokátom nevyžaduje. Inými slovami:Ak fyzická osoba nemá právnické vzdelanie druhého stupňa (Mgr., JUDr.), musí si na spísanie i podanie žaloby nájsť advokáta (pokiaľ nejde o prípady, v ktorých zákon zastúpenie nevyžaduje). Ak tak neurobí, súd ju spravidla vyzve na odstránenie tohto nedostatku. Ak ani potom žalobca zastúpenie advokátom nedoloží, súd žalobu odmietne.",
+        "rozhodnutie": "Rozsudok 15Sas/4/2024",
+        "Url": "https://www.slov-lex.sk/sudne-rozhodnutia/vseobecne-sudy-sr/11860ed9-cf06-4bca-a6d4-6afcc14c969a:55d7c5da-24bd-49aa-8859-6452acfb20f3"
+    }
+    ]
+  }
+
+  

@@ -23,10 +23,12 @@ interface VectorConfig {
 }
 
 export class QdrantClientSingleton {
-  private static instance: QdrantClient;
+  private static instance: QdrantClient | null = null;
+  private static isConnected: boolean = false;
   private static readonly config = {
     host: process.env.QDRANT_HOST || 'localhost',
     port: process.env.QDRANT_PORT || '6333',
+    apiKey: process.env.QDRANT_API_KEY || '',
     collection: process.env.QDRANT_COLLECTION || '500_chunk_size_10_overlap_court_judgements'
   };
 
@@ -34,14 +36,20 @@ export class QdrantClientSingleton {
 
   private constructor() { }
 
-  public static getInstance(): QdrantClient {
+  public static getInstance(): QdrantClient | null {
     if (!QdrantClientSingleton.instance) {
-      QdrantClientSingleton.instance = new QdrantClient({
-        url: QdrantClientSingleton.baseUrl,
-        timeout: 30000,
-      });
-      console.log(`Qdrant client initialized at: ${QdrantClientSingleton.baseUrl}`);
-      console.log('Using Qdrant collection:', QdrantClientSingleton.config.collection);
+      try {
+        QdrantClientSingleton.instance = new QdrantClient({
+          url: QdrantClientSingleton.baseUrl,
+          apiKey: QdrantClientSingleton.config.apiKey,
+          timeout: 30000
+        });
+        console.log(`Qdrant client initialized at: ${QdrantClientSingleton.baseUrl}`);
+        console.log('Using Qdrant collection:', QdrantClientSingleton.config.collection);
+      } catch (error) {
+        console.error('Failed to initialize Qdrant client:', error);
+        return null;
+      }
     }
     return QdrantClientSingleton.instance;
   }
@@ -53,30 +61,44 @@ export class QdrantClientSingleton {
   public static async collectionExists(collectionName: string = this.config.collection): Promise<boolean> {
     try {
       const client = QdrantClientSingleton.getInstance();
+      if (!client) {
+        console.warn('Qdrant client not initialized, skipping collection check');
+        return false;
+      }
       const collections = await client.getCollections();
       return collections.collections.some(c => c.name === collectionName);
     } catch (error) {
-      console.error('Error checking collection existence:', error);
+      console.warn('Error checking collection existence:', error);
       return false;
     }
   }
 
   public static async waitForCollection(collectionName: string = this.config.collection): Promise<void> {
-    const maxAttempts = 30;
+    const maxAttempts = 3; // Reduced from 30 to 3 for faster startup
     const delayMs = 1000;
     let attempts = 0;
 
     while (attempts < maxAttempts) {
-      const exists = await QdrantClientSingleton.collectionExists(collectionName);
-      if (exists) {
-        console.log(`Collection '${collectionName}' ready`);
-        return;
+      try {
+        const exists = await QdrantClientSingleton.collectionExists(collectionName);
+        if (exists) {
+          console.log(`Collection '${collectionName}' ready`);
+          QdrantClientSingleton.isConnected = true;
+          return;
+        }
+      } catch (error) {
+        console.warn(`Attempt ${attempts + 1}/${maxAttempts}: Failed to connect to Qdrant:`, error);
       }
       await new Promise(resolve => setTimeout(resolve, delayMs));
       attempts++;
     }
 
-    throw new Error(`Collection '${collectionName}' not found after ${maxAttempts} attempts`);
+    console.warn(`Warning: Could not connect to Qdrant collection '${collectionName}' after ${maxAttempts} attempts. Application will continue without Qdrant functionality.`);
+    QdrantClientSingleton.isConnected = false;
+  }
+
+  public static isQdrantConnected(): boolean {
+    return QdrantClientSingleton.isConnected;
   }
 }
 
@@ -84,10 +106,13 @@ export class QdrantClientSingleton {
 async function bootstrap() {
   try {
     await QdrantClientSingleton.waitForCollection();
-    console.log('Application started successfully');
+    if (QdrantClientSingleton.isQdrantConnected()) {
+      console.log('Qdrant connection established successfully');
+    } else {
+      console.log('Application starting without Qdrant connection');
+    }
   } catch (error) {
-    console.error('Failed to start application:', error);
-    process.exit(1);
+    console.warn('Warning: Failed to connect to Qdrant. Application will continue without Qdrant functionality:', error);
   }
 }
 

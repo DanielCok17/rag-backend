@@ -9,8 +9,11 @@ import { RETRIEVAL_PROMPTS, SYSTEM_PROMPTS, ERROR_MESSAGES } from '../config/pro
 import OpenAIService from './openaiService';
 import QdrantClientSingleton from '../db/qdrantClient';
 import { loggerService } from './loggerService';
-import { QdrantRecord, TranslatedQdrantRecord } from '../types/qdrant';
+import { TranslatedQdrantRecord } from '../types/qdrant';
 import { traceable } from '../utils/langsmith';
+import { ChatOpenAI } from '@langchain/openai';
+import { PromptTemplate } from '@langchain/core/prompts';
+import { SystemMessage, HumanMessage } from '@langchain/core/messages';
 
 const EMBEDDING_MODEL = "text-embedding-3-large";
 const MAX_CHARS = 10000;
@@ -41,7 +44,7 @@ interface ConversationContext {
 
 class RetrievalService {
     private static instance: RetrievalService;
-    private vectorStore: QdrantVectorStore;
+    private vectorStore: QdrantVectorStore | null = null;
     private embeddings: OpenAIEmbeddings;
     private openAIService: OpenAIService;
     private readonly COLLECTION_NAME = process.env.QDRANT_COLLECTION || '500_chunk_size_10_overlap_court_judgements';
@@ -66,33 +69,44 @@ class RetrievalService {
 
         // Use QdrantClientSingleton instead of creating new client
         const qdrantClient = QdrantClientSingleton.getInstance();
-        this.vectorStore = new QdrantVectorStore(
-            this.embeddings,
-            {
-                client: qdrantClient,
-                collectionName: this.COLLECTION_NAME,
-                collectionConfig: {
-                    vectors: {
-                        size: 3072,
-                        distance: 'Cosine'
+        if (qdrantClient) {
+            this.vectorStore = new QdrantVectorStore(
+                this.embeddings,
+                {
+                    client: qdrantClient,
+                    collectionName: this.COLLECTION_NAME,
+                    collectionConfig: {
+                        vectors: {
+                            size: 3072,
+                            distance: 'Cosine'
+                        }
                     }
                 }
-            }
-        );
+            );
+        } else {
+            loggerService.warn('Qdrant client not initialized, vector store will not be available');
+        }
 
         this.openAIService = OpenAIService.getInstance();
         this.conversationContexts = new Map();
 
-        // Test connection
-        this.testConnection().catch(error => {
-            loggerService.error('Failed to connect to Qdrant', {
-                error: error.message,
-                baseUrl: this.BASE_URL
+        // Test connection only if vector store is initialized
+        if (this.vectorStore) {
+            this.testConnection().catch(error => {
+                loggerService.error('Failed to connect to Qdrant', {
+                    error: error.message,
+                    baseUrl: this.BASE_URL
+                });
             });
-        });
+        }
     }
 
     private async testConnection(): Promise<void> {
+        if (!this.vectorStore) {
+            loggerService.warn('Cannot test connection: vector store not initialized');
+            return;
+        }
+
         try {
             const client = this.vectorStore.client;
             await client.getCollections();
@@ -173,12 +187,12 @@ Prosím vysvetlite v právnickom jazyku.`;
 
             // Format history for better context
             const formattedHistory = history.map((msg, index) => {
-                const prefix = index === 0 ? 'Hlavná otázka' : 
-                             index === history.length - 1 ? 'Posledná otázka' : 
-                             `Doplnujúca otázka ${index}`;
+                const prefix = index === 0 ? 'Hlavná otázka' :
+                    index === history.length - 1 ? 'Posledná otázka' :
+                        `Doplnujúca otázka ${index}`;
                 return `${prefix}:\n${msg.role}: ${msg.content}\n`;
             }).join('\n');
-            
+
             loggerService.debug('Conversation History', { formattedHistory });
 
             // Get relevant documents
@@ -208,7 +222,7 @@ Prosím vysvetlite v právnickom jazyku.`;
             });
 
             // Add conversation progress indicator
-            const progressIndicator = history.length > 1 ? 
+            const progressIndicator = history.length > 1 ?
                 `\n\n=== Progres konverzácie ===\n` +
                 `Otázka ${history.length} z ${history.length}\n` +
                 `Téma: ${this.extractMainTopic(question)}\n` +
@@ -398,6 +412,11 @@ Prosím zahrňte:
     private async safeSimilaritySearch(query: string, k: number = 5, filter?: any): Promise<Document[]> {
         return traceable(async () => {
             try {
+                if (!this.vectorStore) {
+                    loggerService.warn('Vector store not initialized, returning empty results');
+                    return [];
+                }
+
                 console.log(`\n🔍 Performing similarity search with query: ${query.substring(0, 200)}...`);
                 console.log('Filter:', JSON.stringify(filter, null, 2));
 
@@ -410,6 +429,11 @@ Prosím zahrňte:
                     with_payload: true
                 });
 
+                if (!searchResults) {
+                    loggerService.warn('No search results returned from Qdrant');
+                    return [];
+                }
+
                 console.log(`✅ Successfully retrieved ${searchResults.length} documents`);
 
                 // Convert Qdrant results to LangChain documents
@@ -418,40 +442,16 @@ Prosím zahrňte:
                     let content = '';
                     let metadata = { ...payload };
 
-                    // First try to get the actual content from the payload
-                    if (payload?.obsah) {
-                        content = payload.obsah;
-                        delete metadata.obsah;
-                    }
-                    // Then try the standard LangChain format
-                    else if (payload?.pageContent) {
-                        content = payload.pageContent;
-                        delete metadata.pageContent;
-                    }
-                    // Then try the raw text field
-                    else if (payload?.text) {
+                    // Extract content from payload
+                    if (payload.text) {
                         content = payload.text;
-                        delete metadata.text;
+                    } else if (payload.content) {
+                        content = payload.content;
                     }
-                    // Finally, try to get any text content from the payload
-                    else if (payload) {
-                        // Try to find any string value in the payload that's not metadata
-                        for (const [key, value] of Object.entries(payload)) {
-                            if (typeof value === 'string' &&
-                                value.length > 0 &&
-                                !key.toLowerCase().includes('datum') &&
-                                !key.toLowerCase().includes('url') &&
-                                !key.toLowerCase().includes('ecli') &&
-                                !key.toLowerCase().includes('spis') &&
-                                !key.toLowerCase().includes('sud') &&
-                                !key.toLowerCase().includes('type') &&
-                                !key.toLowerCase().includes('chunk')) {
-                                content = value;
-                                delete metadata[key];
-                                break;
-                            }
-                        }
-                    }
+
+                    // Remove content from metadata to avoid duplication
+                    delete metadata.text;
+                    delete metadata.content;
 
                     return new Document({
                         pageContent: content,
@@ -464,8 +464,11 @@ Prosím zahrňte:
 
                 return documents;
             } catch (error) {
-                console.error('Error in safeSimilaritySearch:', error);
-                throw error;
+                loggerService.error('Error in similarity search', {
+                    error: error instanceof Error ? error.message : 'Unknown error',
+                    query: query.substring(0, 200)
+                });
+                return [];
             }
         }, 'safeSimilaritySearch')();
     }
@@ -634,7 +637,7 @@ Prosím zahrňte:
 
             // Sort documents efficiently
             allDocs.sort((a, b) => (a.metadata.chunkIndex || 0) - (b.metadata.chunkIndex || 0));
-            
+
             // Combine results, prioritizing summaries
             const combinedDocs = [...summaries, ...allDocs];
 
@@ -694,7 +697,7 @@ Prosím zahrňte:
                 ]
             };
             const summaryDocs = await this.safeSimilaritySearch("", 1, summaryFilter);
-            
+
             // Add the summary score from the initial search if available
             if (summaryDocs[0] && summaryScore !== undefined) {
                 summaryDocs[0].metadata.score = summaryScore;
@@ -784,14 +787,14 @@ Prosím poskytnite:
             const formattedCases = Array.from(cases.entries()).map(([caseId, caseResults]) => {
                 const firstResult = caseResults[0];
                 const metadata = firstResult.metadata;
-                
+
                 // Separate summaries and content chunks
                 const summaries = caseResults.filter(r => r.metadata.type === 'Zhrnutie');
                 const contentChunks = caseResults.filter(r => r.metadata.type === 'content');
-                
+
                 // Sort content chunks by index to maintain order
                 contentChunks.sort((a, b) => (a.metadata.chunkIndex || 0) - (b.metadata.chunkIndex || 0));
-                
+
                 // Format the case header
                 let formattedCase = `=== Rozsudok ${metadata.caseNumber || 'N/A'} ===
 Súd: ${metadata.court || 'N/A'}
@@ -884,12 +887,20 @@ ${contentChunks.map(c => c.pageContent).join('\n\n')}\n`;
                     contextLength: context.length
                 });
 
+                // Format conversation history in a more visible way
+                const formattedHistory = history.map((msg, idx) => {
+                    if (idx === history.length - 1) {
+                        return `📝 Current Question:\n${msg.role}: ${msg.content}`;
+                    }
+                    return `${msg.role}: ${msg.content}`;
+                }).join('\n');
+
                 // Extract case information from context
                 const caseMatches = context.match(/=== Rozsudok (.*?) ===\nSúd: (.*?)\nDátum: (.*?)\nSudca: (.*?)\nURL: (.*?)\n\nZhrnutie:\n(.*?)\n/g);
-                
+
                 // Build search results header with case information
                 let searchResultsHeader = 'Na základe vyhľadávania v nasledujúcich rozsudkoch:\n\n';
-                
+
                 if (caseMatches) {
                     caseMatches.forEach(match => {
                         const [_, caseNumber, court, date, judge, url, summary] = match.match(/=== Rozsudok (.*?) ===\nSúd: (.*?)\nDátum: (.*?)\nSudca: (.*?)\nURL: (.*?)\n\nZhrnutie:\n(.*?)\n/) || [];
@@ -900,13 +911,6 @@ ${contentChunks.map(c => c.pageContent).join('\n\n')}\n`;
                         }
                     });
                 }
-
-                // Format conversation history for context
-                const conversationContext = history.length > 1 ? 
-                    `\n=== Kontext z predchádzajúcich otázok ===\n` +
-                    history.slice(0, -1).map((msg, index) => 
-                        `${index + 1}. Otázka: ${msg.content}`
-                    ).join('\n') + '\n' : '';
 
                 // Extract metadata from context
                 const metadata = caseMatches ? caseMatches.map(match => {
@@ -920,32 +924,41 @@ ${contentChunks.map(c => c.pageContent).join('\n\n')}\n`;
                     };
                 }) : [];
 
-                // Build the complete prompt with all required components
-                const prompt = `Si právnický asistent špecializovaný na právo.
-Odpovedaj na otázky výlučne na základe informácií poskytnutých v časti "Znalosti" a ich metadát.
-Nepoužívaj svoju internú znalosť, iba ak nemôžeš nájsť relevantné údaje v "Znalostiach" pre všeobecné otázky.
-Ak použiješ internú znalosť, upozorni, že ide o nepresné údaje mimo zákonov či databázy.
-Cituj konkrétne časti rozsudkov (odseky, paragrafy) alebo zákonov (články, paragrafy) a uveď názov dokumentu (napr. 'Rozsudok 3T/115/2023') a URL z metadát, ak je k dispozícii.
+                const prompt = `Si AI právny asistent špecializovaný na slovenské právo. 
+Tvoj cieľ je odpovedať používateľovi zrozumiteľne, prakticky a čo najviac na základe reálnych súdnych rozhodnutí. 
+Tvoja odpoveď má pôsobiť ako konzultácia s dobrým právnikom, nie ako právna analýza pre akademický časopis.
 
-=== Aktuálna otázka ===
-${question}
+=== 📝 Konverzačná História ===
+${formattedHistory}
 
-${conversationContext}
+=== 🔍 Vyhľadané Dokumenty ===
+${searchResultsHeader}
 
-=== Znalosti ===
+=== 📚 Znalosti ===
 ${context}
 
-=== Metadáta ===
+=== 📋 Metadáta ===
 ${JSON.stringify(metadata, null, 2)}
 
-Pri odpovedi sa zamerajte na:
-1. Kľúčové právne zásady zo Zhrnutí
-2. Relevantné zákony a predpisy (citované v Zhrnutiach)
-3. Analýzu situácie (založenú na Zhrnutiach a podporenú detailmi z obsahu)
-4. Potenciálne dôsledky (podložené dokumentmi)
-5. Súvisiace precedenty alebo prípady (s odkazmi na konkrétne Zhrnutia)
+🎯 Pri odpovedi:
+1. **Odpovedaj priamo a konkrétne** – napr. „Za 1 kg marihuany hrozí 3 až 10 rokov väzenia podľa § 171 ods. 4 písm. b) Trestného zákona.“
+2. **Rozober aspoň 2 reálne prípady**:
+   - stručne opíš skutok (čo, kde, kedy),
+   - uveď dátum rozhodnutia, súd, sudcu,
+   - pripoj URL na rozsudok,
+   - spomeň poľahčujúce/prit’ažujúce okolnosti a ich dopad na trest.
+3. **Uveď, čo sa v danom prípade stalo (spolupráca, priznanie, recidíva...) a ako to ovplyvnilo rozhodnutie.**
+4. **Zákonné ustanovenia uveď len vtedy, keď to pomáha vysvetliť rozhodnutie. Nezahlcuj paragrafmi.**
+5. **Na konci urob praktické zhrnutie** – stručne povedz, čo z toho plynie pre používateľa: *„Ak budete spolupracovať, môžete dostať podmienku, inak hrozí 3 až 10 rokov natvrdo.“*
+6. **Nezabudni pridať URL na použité rozsudky.**
 
-Prosím používajte presné citácie zo Zhrnutí a podporné detaily z obsahu dokumentov.`;
+💡 Cieľ: Používateľ má mať po prečítaní tvojej odpovede jasnú predstavu o tom:
+- aký trest mu hrozí,
+- čo mu môže pomôcť (napr. spolupráca),
+- ako vyzerajú podobné reálne prípady a čo z nich vyplýva.
+
+⚠️ Ak niektoré informácie v rozsudkoch chýbajú (napr. nie sú uvedené dôvody rozhodnutia), uveď to a nesnaž sa ich doplniť z vlastnej fantázie.`;
+
 
                 // Log the final prompt with clear formatting
                 console.log('\n\n');
@@ -996,6 +1009,11 @@ Prosím používajte presné citácie zo Zhrnutí a podporné detaily z obsahu d
     public async addDocuments(documents: Array<{ content: string; metadata: any }>): Promise<void> {
         return traceable(async () => {
             try {
+                if (!this.vectorStore) {
+                    loggerService.warn('Vector store not initialized, cannot add documents');
+                    return;
+                }
+
                 console.log('\n📚 ===== STARTING DOCUMENT ADDITION =====');
                 console.log(`Number of documents to add: ${documents.length}`);
 
@@ -1114,8 +1132,12 @@ Prosím používajte presné citácie zo Zhrnutí a podporné detaily z obsahu d
      * @returns Translated Qdrant record
      */
     public async getQdrantRecord(recordId: string): Promise<TranslatedQdrantRecord> {
+        if (!this.vectorStore) {
+            throw new Error('Qdrant vector store not initialized');
+        }
+
         try {
-            const client = QdrantClientSingleton.getInstance();
+            const client = this.vectorStore.client;
             const record = await client.retrieve(this.COLLECTION_NAME, {
                 ids: [recordId],
                 with_payload: true,
@@ -1179,7 +1201,7 @@ Prosím používajte presné citácie zo Zhrnutí a podporné detaily z obsahu d
      */
     public async getRecordsByCaseId(caseId: string): Promise<TranslatedQdrantRecord[]> {
         try {
-            const response = await this.vectorStore.client.scroll(
+            const response = await this.vectorStore?.client.scroll(
                 this.COLLECTION_NAME,
                 {
                     filter: {
@@ -1203,7 +1225,7 @@ Prosím používajte presné citácie zo Zhrnutí a podporné detaily z obsahu d
             // Process records efficiently
             return response.points.map(point => {
                 const payload = point.payload as Record<string, any>;
-                
+
                 const translatedMetadata = {
                     title: String(payload.title || ''),
                     url: String(payload.url || ''),
@@ -1259,6 +1281,42 @@ Prosím používajte presné citácie zo Zhrnutí a podporné detaily z obsahu d
                 return 'Vector interpretation not available';
             }
         }, 'getVectorInterpretation')();
+    }
+
+    private async summarizeDocuments(documents: Document[], promptType: keyof typeof SYSTEM_PROMPTS = 'DEFAULT'): Promise<string> {
+        // Limit tokens per document to improve latency
+        const MAX_TOKENS_PER_DOC = 1000;
+        const filteredDocs = documents.map(doc => {
+            const content = doc.pageContent;
+            // Rough estimate: 1 token ≈ 4 chars
+            if (content.length > MAX_TOKENS_PER_DOC * 4) {
+                return new Document({
+                    pageContent: content.substring(0, MAX_TOKENS_PER_DOC * 4),
+                    metadata: { ...doc.metadata, truncated: true }
+                });
+            }
+            return doc;
+        });
+
+        const model = new ChatOpenAI({
+            modelName: process.env.OPENAI_MODEL || 'gpt-4o-mini',
+            temperature: 0,
+            maxTokens: 1000, // Limit response length
+            streaming: false // Disable streaming for faster response
+        });
+
+        const systemMessage = new SystemMessage(SYSTEM_PROMPTS[promptType]);
+        const humanMessage = new HumanMessage(`
+${filteredDocs.map(doc => doc.pageContent).join('\n\n')}
+
+Prosím poskytnite:
+1. Hlavné body
+2. Kľúčové zistenia
+3. Právne dôsledky
+4. Dôležité precedenty`);
+
+        const response = await model.invoke([systemMessage, humanMessage]);
+        return response.content.toString();
     }
 }
 
